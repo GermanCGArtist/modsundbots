@@ -1,13 +1,84 @@
 use eframe::egui::{
-    self, Color32, ColorImage, CornerRadius, Id, Margin, Mesh, Pos2, Rect, Response, Sense, Shadow,
-    Shape, Stroke, StrokeKind, TextureFilter, TextureHandle, TextureOptions, TextureWrapMode, Vec2,
-    epaint::RectShape,
+    self, Color32, ColorImage, CornerRadius, IconData, Id, Margin, Mesh, Pos2, Rect, Response,
+    Sense, Shadow, Shape, Stroke, StrokeKind, TextureFilter, TextureHandle, TextureOptions,
+    TextureWrapMode, Vec2, epaint::RectShape,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlassMode {
     Dark,
     Light,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemePreset {
+    /// Signature ModsUndBots theme: obsidian-emerald & cyber-mint Liquid Glass
+    EmeraldPrism,
+    /// Classic Apple macOS Tahoe: deep sapphire & iris-violet Liquid Glass
+    TahoeSapphire,
+    /// Modder's edition: twilight obsidian & luminous amethyst geode glass
+    AmethystForge,
+    /// Apple Daylight Frost: frosted alabaster & sky/mint light Liquid Glass
+    DaylightFrost,
+}
+
+impl ThemePreset {
+    pub const ALL: [Self; 4] = [
+        Self::EmeraldPrism,
+        Self::TahoeSapphire,
+        Self::AmethystForge,
+        Self::DaylightFrost,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::EmeraldPrism => "Emerald Prism",
+            Self::TahoeSapphire => "Tahoe Sapphire",
+            Self::AmethystForge => "Amethyst Forge",
+            Self::DaylightFrost => "Daylight Frost",
+        }
+    }
+
+    pub const fn subtitle(self) -> &'static str {
+        match self {
+            Self::EmeraldPrism => "Signature ModsUndBots",
+            Self::TahoeSapphire => "macOS Tahoe Blue",
+            Self::AmethystForge => "Modder's Geode Violet",
+            Self::DaylightFrost => "Frosted Daylight",
+        }
+    }
+
+    pub const fn mode(self) -> GlassMode {
+        match self {
+            Self::DaylightFrost => GlassMode::Light,
+            Self::EmeraldPrism | Self::TahoeSapphire | Self::AmethystForge => GlassMode::Dark,
+        }
+    }
+
+    pub const fn swatch_colors(self) -> (Color32, Color32, Color32) {
+        match self {
+            Self::EmeraldPrism => (
+                Color32::from_rgb(10, 26, 28),
+                Color32::from_rgb(36, 214, 148),
+                Color32::from_rgb(64, 212, 255),
+            ),
+            Self::TahoeSapphire => (
+                Color32::from_rgb(12, 20, 44),
+                Color32::from_rgb(56, 162, 255),
+                Color32::from_rgb(146, 98, 255),
+            ),
+            Self::AmethystForge => (
+                Color32::from_rgb(20, 14, 36),
+                Color32::from_rgb(176, 124, 255),
+                Color32::from_rgb(242, 114, 198),
+            ),
+            Self::DaylightFrost => (
+                Color32::from_rgb(226, 238, 255),
+                Color32::from_rgb(18, 176, 124),
+                Color32::from_rgb(0, 122, 255),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +124,7 @@ pub enum NavIcon {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
+    pub preset: ThemePreset,
     pub mode: GlassMode,
 
     // Unpolished / frosted matte glass surfaces (cloudier, satin finish)
@@ -88,7 +160,8 @@ pub struct Palette {
     pub text_muted: Color32,
     pub text_on_accent: Color32,
 
-    // Apple-inspired luminous system accents
+    // Theme & semantic accents
+    pub accent_primary: Color32,
     pub accent_blue: Color32,
     pub accent_cyan: Color32,
     pub accent_emerald: Color32,
@@ -123,11 +196,56 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 impl Palette {
-    pub const fn for_mode(mode: GlassMode) -> Self {
-        match mode {
-            GlassMode::Dark => Self {
-                mode,
-                // Unpolished / frosted matte surfaces (milky, diffused, less clear)
+    pub const fn for_preset(preset: ThemePreset) -> Self {
+        match preset {
+            ThemePreset::EmeraldPrism => Self {
+                preset,
+                mode: GlassMode::Dark,
+                island_fill: rgba(24, 38, 46, 212),
+                card_fill: rgba(26, 40, 48, 190),
+                well_fill: rgba(10, 18, 24, 174),
+                terminal_fill: rgba(8, 14, 20, 228),
+                frost_grain_tint: rgba(210, 250, 240, 13),
+                frost_haze_top: rgba(196, 248, 236, 15),
+
+                toolbar_fill: rgba(20, 34, 42, 138),
+                elevated_fill: rgba(30, 46, 56, 176),
+
+                border_subtle: rgba(220, 255, 246, 32),
+                border_bright: rgba(220, 255, 246, 84),
+                specular_top: rgba(235, 255, 250, 132),
+                sheen_top: rgba(220, 255, 248, 24),
+                divider: rgba(220, 255, 246, 26),
+                shadow_color: rgba(2, 8, 12, 114),
+
+                control_fill: rgba(235, 255, 250, 18),
+                control_hover: rgba(235, 255, 250, 38),
+                control_active: rgba(36, 214, 148, 72),
+                segment_thumb_fill: rgba(225, 255, 246, 42),
+                segment_thumb_border: rgba(225, 255, 246, 108),
+
+                text_primary: Color32::from_rgb(242, 252, 250),
+                text_secondary: rgba(220, 242, 238, 210),
+                text_muted: rgba(168, 204, 200, 158),
+                text_on_accent: Color32::WHITE,
+
+                accent_primary: Color32::from_rgb(38, 222, 156),
+                accent_blue: Color32::from_rgb(64, 182, 255),
+                accent_cyan: Color32::from_rgb(82, 232, 248),
+                accent_emerald: Color32::from_rgb(44, 222, 146),
+                accent_amber: Color32::from_rgb(255, 202, 64),
+                accent_red: Color32::from_rgb(255, 96, 98),
+
+                primary_glass_fill: rgba(16, 168, 118, 218),
+                primary_glass_hover: rgba(28, 194, 138, 240),
+                primary_glass_border: rgba(154, 255, 220, 190),
+                danger_glass_fill: rgba(224, 56, 66, 208),
+                danger_glass_hover: rgba(244, 76, 86, 234),
+                danger_glass_border: rgba(255, 178, 182, 170),
+            },
+            ThemePreset::TahoeSapphire => Self {
+                preset,
+                mode: GlassMode::Dark,
                 island_fill: rgba(34, 42, 62, 212),
                 card_fill: rgba(36, 44, 66, 188),
                 well_fill: rgba(14, 18, 30, 168),
@@ -135,7 +253,6 @@ impl Palette {
                 frost_grain_tint: rgba(230, 240, 255, 13),
                 frost_haze_top: rgba(220, 232, 255, 14),
 
-                // Clear / polished liquid glass surfaces (crisper translucency)
                 toolbar_fill: rgba(28, 36, 56, 132),
                 elevated_fill: rgba(40, 50, 76, 168),
 
@@ -157,6 +274,7 @@ impl Palette {
                 text_muted: rgba(196, 210, 238, 154),
                 text_on_accent: Color32::WHITE,
 
+                accent_primary: Color32::from_rgb(56, 162, 255),
                 accent_blue: Color32::from_rgb(56, 162, 255),
                 accent_cyan: Color32::from_rgb(90, 216, 255),
                 accent_emerald: Color32::from_rgb(48, 214, 128),
@@ -170,9 +288,54 @@ impl Palette {
                 danger_glass_hover: rgba(244, 78, 86, 232),
                 danger_glass_border: rgba(255, 178, 182, 170),
             },
-            GlassMode::Light => Self {
-                mode,
-                // Unpolished / frosted matte surfaces (milky sandblasted daylight glass)
+            ThemePreset::AmethystForge => Self {
+                preset,
+                mode: GlassMode::Dark,
+                island_fill: rgba(40, 32, 60, 214),
+                card_fill: rgba(44, 34, 66, 190),
+                well_fill: rgba(18, 14, 30, 176),
+                terminal_fill: rgba(14, 10, 24, 228),
+                frost_grain_tint: rgba(240, 224, 255, 13),
+                frost_haze_top: rgba(238, 218, 255, 15),
+
+                toolbar_fill: rgba(34, 26, 54, 136),
+                elevated_fill: rgba(52, 40, 78, 174),
+
+                border_subtle: rgba(244, 228, 255, 34),
+                border_bright: rgba(244, 228, 255, 86),
+                specular_top: rgba(250, 238, 255, 132),
+                sheen_top: rgba(244, 228, 255, 24),
+                divider: rgba(244, 228, 255, 28),
+                shadow_color: rgba(6, 2, 16, 114),
+
+                control_fill: rgba(248, 236, 255, 18),
+                control_hover: rgba(248, 236, 255, 38),
+                control_active: rgba(168, 108, 255, 76),
+                segment_thumb_fill: rgba(248, 236, 255, 44),
+                segment_thumb_border: rgba(248, 236, 255, 108),
+
+                text_primary: Color32::from_rgb(248, 244, 255),
+                text_secondary: rgba(236, 224, 252, 210),
+                text_muted: rgba(198, 182, 226, 158),
+                text_on_accent: Color32::WHITE,
+
+                accent_primary: Color32::from_rgb(180, 126, 255),
+                accent_blue: Color32::from_rgb(112, 168, 255),
+                accent_cyan: Color32::from_rgb(132, 218, 255),
+                accent_emerald: Color32::from_rgb(56, 218, 156),
+                accent_amber: Color32::from_rgb(255, 198, 72),
+                accent_red: Color32::from_rgb(255, 96, 116),
+
+                primary_glass_fill: rgba(140, 82, 242, 218),
+                primary_glass_hover: rgba(164, 108, 255, 240),
+                primary_glass_border: rgba(226, 196, 255, 190),
+                danger_glass_fill: rgba(226, 58, 78, 206),
+                danger_glass_hover: rgba(244, 78, 98, 232),
+                danger_glass_border: rgba(255, 182, 192, 170),
+            },
+            ThemePreset::DaylightFrost => Self {
+                preset,
+                mode: GlassMode::Light,
                 island_fill: rgba(246, 250, 255, 214),
                 card_fill: rgba(248, 251, 255, 196),
                 well_fill: rgba(206, 220, 242, 148),
@@ -180,7 +343,6 @@ impl Palette {
                 frost_grain_tint: rgba(80, 105, 145, 14),
                 frost_haze_top: rgba(255, 255, 255, 58),
 
-                // Clear / polished liquid glass surfaces
                 toolbar_fill: rgba(255, 255, 255, 138),
                 elevated_fill: rgba(255, 255, 255, 186),
 
@@ -193,7 +355,7 @@ impl Palette {
 
                 control_fill: rgba(255, 255, 255, 142),
                 control_hover: rgba(255, 255, 255, 212),
-                control_active: rgba(0, 122, 255, 44),
+                control_active: rgba(16, 168, 118, 44),
                 segment_thumb_fill: rgba(255, 255, 255, 238),
                 segment_thumb_border: rgba(255, 255, 255, 255),
 
@@ -202,15 +364,16 @@ impl Palette {
                 text_muted: Color32::from_rgb(92, 108, 136),
                 text_on_accent: Color32::WHITE,
 
+                accent_primary: Color32::from_rgb(14, 158, 112),
                 accent_blue: Color32::from_rgb(0, 118, 255),
-                accent_cyan: Color32::from_rgb(0, 158, 214),
+                accent_cyan: Color32::from_rgb(0, 154, 206),
                 accent_emerald: Color32::from_rgb(18, 166, 86),
                 accent_amber: Color32::from_rgb(204, 126, 0),
                 accent_red: Color32::from_rgb(220, 48, 48),
 
-                primary_glass_fill: rgba(0, 122, 255, 224),
-                primary_glass_hover: rgba(24, 138, 255, 244),
-                primary_glass_border: rgba(164, 214, 255, 215),
+                primary_glass_fill: rgba(14, 158, 112, 224),
+                primary_glass_hover: rgba(22, 178, 128, 244),
+                primary_glass_border: rgba(154, 242, 212, 215),
                 danger_glass_fill: rgba(226, 54, 58, 218),
                 danger_glass_hover: rgba(242, 72, 76, 240),
                 danger_glass_border: rgba(255, 188, 190, 200),
@@ -231,15 +394,17 @@ fn frost_grain_texture(ctx: &egui::Context) -> TextureHandle {
     let mut pixels = vec![Color32::TRANSPARENT; N * N];
     for y in 0..N {
         for x in 0..N {
-            // Deterministic low-discrepancy hash for fine sandblasted glass grain
             let mut h = (x as u32).wrapping_mul(374_761_393)
                 ^ (y as u32).wrapping_mul(668_265_263)
                 ^ 0x9E37_79B9;
             h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
             h ^= h >> 16;
             let v = (h & 0xFF) as u8;
-            // Subtle high-frequency frosted speckle
-            let alpha = if v > 150 { ((v - 150) as u16 * 2).min(255) as u8 } else { 0 };
+            let alpha = if v > 150 {
+                ((v - 150) as u16 * 2).min(255) as u8
+            } else {
+                0
+            };
             pixels[y * N + x] = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
         }
     }
@@ -259,8 +424,8 @@ fn frost_grain_texture(ctx: &egui::Context) -> TextureHandle {
     tex
 }
 
-pub fn apply_theme(ctx: &egui::Context, mode: GlassMode) {
-    let p = Palette::for_mode(mode);
+pub fn apply_theme(ctx: &egui::Context, preset: ThemePreset) {
+    let p = Palette::for_preset(preset);
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = Vec2::new(8.0, 8.0);
     style.spacing.button_padding = Vec2::new(14.0, 7.0);
@@ -269,7 +434,7 @@ pub fn apply_theme(ctx: &egui::Context, mode: GlassMode) {
     style.spacing.combo_height = 240.0;
     style.animation_time = 0.22;
 
-    let mut visuals = match mode {
+    let mut visuals = match p.mode {
         GlassMode::Dark => egui::Visuals::dark(),
         GlassMode::Light => egui::Visuals::light(),
     };
@@ -292,7 +457,7 @@ pub fn apply_theme(ctx: &egui::Context, mode: GlassMode) {
         spread: 0,
         color: p.shadow_color,
     };
-    visuals.hyperlink_color = p.accent_blue;
+    visuals.hyperlink_color = p.accent_primary;
 
     visuals.widgets.noninteractive.bg_fill = p.card_fill;
     visuals.widgets.noninteractive.weak_bg_fill = p.well_fill;
@@ -314,7 +479,7 @@ pub fn apply_theme(ctx: &egui::Context, mode: GlassMode) {
 
     visuals.widgets.active.bg_fill = p.control_active;
     visuals.widgets.active.weak_bg_fill = p.control_active;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.accent_blue);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.accent_primary);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
     visuals.widgets.active.corner_radius = CornerRadius::same(14);
 
@@ -324,21 +489,42 @@ pub fn apply_theme(ctx: &egui::Context, mode: GlassMode) {
     visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
     visuals.widgets.open.corner_radius = CornerRadius::same(14);
 
-    visuals.selection.bg_fill = rgba(p.accent_blue.r(), p.accent_blue.g(), p.accent_blue.b(), 64);
-    visuals.selection.stroke = Stroke::new(1.0_f32, p.accent_blue);
+    visuals.selection.bg_fill = rgba(
+        p.accent_primary.r(),
+        p.accent_primary.g(),
+        p.accent_primary.b(),
+        64,
+    );
+    visuals.selection.stroke = Stroke::new(1.0_f32, p.accent_primary);
 
     style.visuals = visuals;
     ctx.set_style(style);
 }
 
-/// Paints a lush, Apple macOS Tahoe-inspired atmospheric Liquid Glass wallpaper
-/// with a bilinear aurora mesh and soft caustic light orbs behind the frosted surfaces.
-pub fn paint_liquid_backdrop(ctx: &egui::Context, mode: GlassMode) {
+/// Paints a lush atmospheric Liquid Glass wallpaper tailored to the active `ThemePreset`.
+pub fn paint_liquid_backdrop(ctx: &egui::Context, preset: ThemePreset) {
     let rect = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::background());
 
-    let colors = match mode {
-        GlassMode::Dark => [
+    let colors = match preset {
+        ThemePreset::EmeraldPrism => [
+            [
+                Color32::from_rgb(8, 28, 30),
+                Color32::from_rgb(9, 20, 32),
+                Color32::from_rgb(10, 30, 44),
+            ],
+            [
+                Color32::from_rgb(7, 18, 26),
+                Color32::from_rgb(10, 22, 30),
+                Color32::from_rgb(12, 26, 40),
+            ],
+            [
+                Color32::from_rgb(6, 14, 20),
+                Color32::from_rgb(10, 28, 32),
+                Color32::from_rgb(8, 22, 36),
+            ],
+        ],
+        ThemePreset::TahoeSapphire => [
             [
                 Color32::from_rgb(10, 22, 46),
                 Color32::from_rgb(12, 18, 42),
@@ -355,21 +541,38 @@ pub fn paint_liquid_backdrop(ctx: &egui::Context, mode: GlassMode) {
                 Color32::from_rgb(10, 26, 40),
             ],
         ],
-        GlassMode::Light => [
+        ThemePreset::AmethystForge => [
             [
-                Color32::from_rgb(214, 232, 255),
-                Color32::from_rgb(230, 238, 255),
-                Color32::from_rgb(232, 222, 255),
+                Color32::from_rgb(22, 14, 42),
+                Color32::from_rgb(18, 14, 36),
+                Color32::from_rgb(36, 18, 52),
             ],
             [
-                Color32::from_rgb(218, 242, 252),
-                Color32::from_rgb(238, 244, 255),
-                Color32::from_rgb(244, 230, 252),
+                Color32::from_rgb(16, 12, 30),
+                Color32::from_rgb(22, 16, 38),
+                Color32::from_rgb(32, 16, 46),
             ],
             [
-                Color32::from_rgb(220, 244, 242),
-                Color32::from_rgb(232, 240, 255),
-                Color32::from_rgb(218, 236, 255),
+                Color32::from_rgb(12, 10, 24),
+                Color32::from_rgb(26, 14, 44),
+                Color32::from_rgb(16, 18, 38),
+            ],
+        ],
+        ThemePreset::DaylightFrost => [
+            [
+                Color32::from_rgb(212, 240, 238),
+                Color32::from_rgb(228, 240, 255),
+                Color32::from_rgb(230, 226, 255),
+            ],
+            [
+                Color32::from_rgb(216, 244, 248),
+                Color32::from_rgb(238, 246, 255),
+                Color32::from_rgb(242, 234, 254),
+            ],
+            [
+                Color32::from_rgb(216, 246, 238),
+                Color32::from_rgb(230, 242, 255),
+                Color32::from_rgb(218, 238, 255),
             ],
         ],
     };
@@ -395,7 +598,6 @@ pub fn paint_liquid_backdrop(ctx: &egui::Context, mode: GlassMode) {
     }
     painter.add(Shape::mesh(mesh));
 
-    // Soft caustic ambient light orbs (concentric radial falloff, zero extra repaints)
     struct CausticOrb {
         fx: f32,
         fy: f32,
@@ -406,18 +608,30 @@ pub fn paint_liquid_backdrop(ctx: &egui::Context, mode: GlassMode) {
 
     let w = rect.width();
     let h = rect.height();
-    let orbs: &[CausticOrb] = match mode {
-        GlassMode::Dark => &[
+    let orbs: &[CausticOrb] = match preset {
+        ThemePreset::EmeraldPrism => &[
+            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.36, rgb: (32, 224, 152), peak_alpha: 38 },
+            CausticOrb { fx: 0.84, fy: 0.22, fr: 0.38, rgb: (44, 196, 255), peak_alpha: 34 },
+            CausticOrb { fx: 0.72, fy: 0.84, fr: 0.36, rgb: (24, 210, 170), peak_alpha: 32 },
+            CausticOrb { fx: 0.26, fy: 0.80, fr: 0.30, rgb: (56, 138, 255), peak_alpha: 24 },
+        ],
+        ThemePreset::TahoeSapphire => &[
             CausticOrb { fx: 0.14, fy: 0.16, fr: 0.34, rgb: (40, 175, 255), peak_alpha: 36 },
             CausticOrb { fx: 0.84, fy: 0.20, fr: 0.38, rgb: (142, 92, 255), peak_alpha: 34 },
             CausticOrb { fx: 0.76, fy: 0.84, fr: 0.36, rgb: (36, 214, 152), peak_alpha: 30 },
             CausticOrb { fx: 0.24, fy: 0.82, fr: 0.30, rgb: (48, 128, 255), peak_alpha: 26 },
         ],
-        GlassMode::Light => &[
-            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.38, rgb: (112, 198, 255), peak_alpha: 64 },
-            CausticOrb { fx: 0.84, fy: 0.20, fr: 0.40, rgb: (192, 152, 255), peak_alpha: 56 },
-            CausticOrb { fx: 0.76, fy: 0.84, fr: 0.38, rgb: (112, 232, 192), peak_alpha: 56 },
-            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.32, rgb: (132, 184, 255), peak_alpha: 50 },
+        ThemePreset::AmethystForge => &[
+            CausticOrb { fx: 0.16, fy: 0.18, fr: 0.36, rgb: (172, 98, 255), peak_alpha: 40 },
+            CausticOrb { fx: 0.84, fy: 0.22, fr: 0.38, rgb: (244, 102, 194), peak_alpha: 34 },
+            CausticOrb { fx: 0.74, fy: 0.84, fr: 0.34, rgb: (106, 132, 255), peak_alpha: 30 },
+            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.30, rgb: (196, 118, 255), peak_alpha: 26 },
+        ],
+        ThemePreset::DaylightFrost => &[
+            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.38, rgb: (96, 224, 186), peak_alpha: 64 },
+            CausticOrb { fx: 0.84, fy: 0.20, fr: 0.40, rgb: (132, 194, 255), peak_alpha: 58 },
+            CausticOrb { fx: 0.76, fy: 0.84, fr: 0.38, rgb: (176, 156, 255), peak_alpha: 52 },
+            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.32, rgb: (118, 218, 246), peak_alpha: 50 },
         ],
     };
 
@@ -431,7 +645,9 @@ pub fn paint_liquid_backdrop(ctx: &egui::Context, mode: GlassMode) {
             let t = (step + 1) as f32 / RINGS as f32;
             let radius = max_radius * t;
             let falloff = (1.0 - t * 0.85).powi(2);
-            let alpha = ((orb.peak_alpha as f32 * falloff) / 1.4).round().clamp(1.0, 255.0) as u8;
+            let alpha = ((orb.peak_alpha as f32 * falloff) / 1.4)
+                .round()
+                .clamp(1.0, 255.0) as u8;
             painter.circle_filled(center, radius, rgba(r, g, b, alpha));
         }
     }
@@ -505,7 +721,6 @@ pub fn glass_box<R>(
 
     let mut shapes = Vec::with_capacity(6);
 
-    // 1. Soft ambient drop shadow
     if shadow_blur > 0 {
         let shadow = Shadow {
             offset: [0, shadow_y],
@@ -516,27 +731,21 @@ pub fn glass_box<R>(
         shapes.push(Shape::Rect(shadow.as_shape(rect, cr)));
     }
 
-    // 2. Translucent body
     shapes.push(Shape::rect_filled(rect, cr, fill));
 
-    // 3. Material finish layer:
-    //    - Frosted (unpolished): tiled sandblasted micro-grain + wide diffused satin haze
-    //    - Clear (polished): tight overhead liquid sheen + crisp specular top catchlight
     match finish {
         GlassFinish::Frosted => {
-            // Tiled micro-frost grain clipped cleanly to the rounded rect
             if rect.width() > 8.0 && rect.height() > 8.0 {
                 let grain_tex = frost_grain_texture(ui.ctx());
                 let uv = Rect::from_min_max(
                     Pos2::ZERO,
                     Pos2::new(rect.width() / 64.0, rect.height() / 64.0),
                 );
-                let grain_shape =
-                    RectShape::filled(rect, cr, palette.frost_grain_tint).with_texture(grain_tex.id(), uv);
+                let grain_shape = RectShape::filled(rect, cr, palette.frost_grain_tint)
+                    .with_texture(grain_tex.id(), uv);
                 shapes.push(Shape::Rect(grain_shape));
             }
 
-            // Wide, diffused satin frost haze (no harsh mirror glare)
             if elevation != GlassElevation::Well && rect.height() > 28.0 && rect.width() > 28.0 {
                 let haze_h = (rect.height() * 0.55).clamp(18.0, 96.0);
                 let inset = 1.5_f32;
@@ -571,7 +780,6 @@ pub fn glass_box<R>(
             }
         }
         GlassFinish::Clear => {
-            // Crisp liquid sheen along upper third
             if rect.height() > 24.0 && rect.width() > 24.0 {
                 let sheen_h = (rect.height() * 0.34).clamp(12.0, 40.0);
                 let inset = 1.5_f32;
@@ -607,7 +815,6 @@ pub fn glass_box<R>(
         }
     }
 
-    // 4. Refractive hairline perimeter border
     shapes.push(Shape::rect_stroke(
         rect,
         cr,
@@ -615,7 +822,6 @@ pub fn glass_box<R>(
         StrokeKind::Inside,
     ));
 
-    // 5. Specular top catchlight (brighter on Clear glass, softer satin on Frosted glass)
     if elevation != GlassElevation::Well && rect.width() > r_f32 * 2.0 + 12.0 {
         let y = rect.top() + 1.0;
         let x0 = rect.left() + r_f32.max(10.0);
@@ -714,6 +920,99 @@ pub fn glass_terminal<R>(
     )
 }
 
+/// Interactive Liquid Glass Theme Preset swatch card for Settings.
+pub fn theme_swatch_card(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    preset: ThemePreset,
+    selected: bool,
+) -> Response {
+    let desired = Vec2::new(172.0, 82.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let sel_t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("sel"), selected, 0.18);
+        let hov_t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
+
+        let cr = CornerRadius::same(16);
+        let p = ui.painter();
+        let (bg_base, orb_a, orb_b) = preset.swatch_colors();
+
+        // Card fill
+        let fill = lerp_color(palette.well_fill, palette.control_hover, (sel_t * 0.6 + hov_t * 0.35).min(1.0));
+        p.rect_filled(rect, cr, fill);
+
+        let border_col = lerp_color(palette.border_subtle, palette.accent_primary, sel_t.max(hov_t * 0.4));
+        p.rect_stroke(
+            rect,
+            cr,
+            Stroke::new(if selected { 1.6_f32 } else { 1.0_f32 }, border_col),
+            StrokeKind::Inside,
+        );
+
+        // Mini Liquid Glass wallpaper preview pill at top of swatch
+        let preview = Rect::from_min_size(
+            Pos2::new(rect.left() + 10.0, rect.top() + 10.0),
+            Vec2::new(rect.width() - 20.0, 26.0),
+        );
+        let pcr = CornerRadius::same(9);
+        p.rect_filled(preview, pcr, bg_base);
+        p.circle_filled(
+            Pos2::new(preview.left() + 22.0, preview.center().y),
+            12.0,
+            rgba(orb_a.r(), orb_a.g(), orb_a.b(), 185),
+        );
+        p.circle_filled(
+            Pos2::new(preview.right() - 26.0, preview.center().y),
+            12.0,
+            rgba(orb_b.r(), orb_b.g(), orb_b.b(), 165),
+        );
+        p.rect_stroke(
+            preview,
+            pcr,
+            Stroke::new(1.0_f32, rgba(255, 255, 255, 90)),
+            StrokeKind::Inside,
+        );
+
+        // Name & subtitle
+        let name_galley = p.layout_no_wrap(
+            preset.name().to_string(),
+            egui::FontId::proportional(13.0),
+            palette.text_primary,
+        );
+        p.galley(
+            Pos2::new(rect.left() + 12.0, rect.top() + 43.0),
+            name_galley,
+            palette.text_primary,
+        );
+
+        let sub_galley = p.layout_no_wrap(
+            preset.subtitle().to_string(),
+            egui::FontId::proportional(10.5),
+            palette.text_muted,
+        );
+        p.galley(
+            Pos2::new(rect.left() + 12.0, rect.top() + 60.0),
+            sub_galley,
+            palette.text_muted,
+        );
+
+        if selected {
+            p.circle_filled(
+                Pos2::new(rect.right() - 16.0, rect.top() + 50.0),
+                4.0,
+                palette.accent_primary,
+            );
+        }
+    }
+
+    resp
+}
+
 /// Apple Liquid Glass capsule button with smooth animated hover/press transitions
 /// and specular top catchlight.
 pub fn pill_button(
@@ -766,7 +1065,6 @@ pub fn pill_button(
             0.09,
         );
 
-        // Subtle tactile shrink on press like iOS/macOS buttons
         let draw_rect = rect.shrink(press_t * 0.9);
         let cr = CornerRadius::same((draw_rect.height() * 0.5) as u8);
         let bg = lerp_color(fill, hover_fill, (hover_t + press_t * 0.5).min(1.0));
@@ -787,7 +1085,6 @@ pub fn pill_button(
         let stroke_a = lerp_color(stroke_col, Color32::WHITE, hover_t * 0.25);
         p.rect_stroke(draw_rect, cr, Stroke::new(1.0_f32, stroke_a), StrokeKind::Inside);
 
-        // Specular top catchlight on capsule
         if bg.a() > 0 {
             let pad = draw_rect.height() * 0.45;
             p.line_segment(
@@ -795,7 +1092,10 @@ pub fn pill_button(
                     Pos2::new(draw_rect.left() + pad, draw_rect.top() + 1.0),
                     Pos2::new(draw_rect.right() - pad, draw_rect.top() + 1.0),
                 ],
-                Stroke::new(1.0_f32, rgba(255, 255, 255, (96.0 + hover_t * 50.0) as u8)),
+                Stroke::new(
+                    1.0_f32,
+                    rgba(255, 255, 255, (96.0 + hover_t * 50.0) as u8),
+                ),
             );
         }
 
@@ -843,22 +1143,21 @@ pub fn glass_toggle(
                     0.10,
                 );
 
-                // Mid-motion liquid stretch peaks at t == 0.5 or while pressed
                 let motion_stretch = (1.0 - (2.0 * t - 1.0).abs()) * 5.0 + press_t * 3.5;
 
                 let p = ui.painter();
                 let track_cr = CornerRadius::same((rect.height() * 0.5) as u8);
                 let off_track = palette.well_fill;
                 let on_track = rgba(
-                    palette.accent_emerald.r(),
-                    palette.accent_emerald.g(),
-                    palette.accent_emerald.b(),
-                    215,
+                    palette.accent_primary.r(),
+                    palette.accent_primary.g(),
+                    palette.accent_primary.b(),
+                    218,
                 );
                 let track_fill = lerp_color(off_track, on_track, t);
                 let track_border = lerp_color(
                     palette.border_subtle,
-                    rgba(180, 255, 215, 165),
+                    rgba(200, 255, 232, 175),
                     t.max(hover_t * 0.4),
                 );
 
@@ -870,7 +1169,6 @@ pub fn glass_toggle(
                     StrokeKind::Inside,
                 );
 
-                // Liquid glass thumb (glides smoothly + stretches horizontally mid-transition)
                 let pad = 2.5_f32;
                 let base_d = rect.height() - pad * 2.0;
                 let thumb_w = base_d + motion_stretch;
@@ -891,8 +1189,7 @@ pub fn glass_toggle(
                 };
                 p.add(thumb_shadow.as_shape(thumb_rect, thumb_cr));
 
-                let thumb_fill = rgba(255, 255, 255, 240);
-                p.rect_filled(thumb_rect, thumb_cr, thumb_fill);
+                p.rect_filled(thumb_rect, thumb_cr, rgba(255, 255, 255, 240));
                 p.rect_stroke(
                     thumb_rect,
                     thumb_cr,
@@ -1006,8 +1303,16 @@ pub fn nav_pill(
             );
         }
 
-        let icon_color = lerp_color(palette.text_muted, palette.accent_blue, sel_t.max(hov_t * 0.4));
-        let text_color = lerp_color(palette.text_secondary, palette.text_primary, sel_t.max(hov_t * 0.6));
+        let icon_color = lerp_color(
+            palette.text_muted,
+            palette.accent_primary,
+            sel_t.max(hov_t * 0.4),
+        );
+        let text_color = lerp_color(
+            palette.text_secondary,
+            palette.text_primary,
+            sel_t.max(hov_t * 0.6),
+        );
 
         let icon_center = Pos2::new(rect.left() + 20.0, rect.center().y);
         paint_nav_icon(p, icon_center, icon, icon_color);
@@ -1025,7 +1330,7 @@ pub fn nav_pill(
 
         if let Some(count) = badge_count {
             let count_str = count.to_string();
-            let badge_text_col = lerp_color(palette.text_muted, palette.accent_blue, sel_t);
+            let badge_text_col = lerp_color(palette.text_muted, palette.accent_primary, sel_t);
             let badge_galley = p.layout_no_wrap(
                 count_str,
                 egui::FontId::proportional(11.0),
@@ -1039,7 +1344,12 @@ pub fn nav_pill(
             );
             let badge_fill = lerp_color(
                 palette.well_fill,
-                rgba(palette.accent_blue.r(), palette.accent_blue.g(), palette.accent_blue.b(), 40),
+                rgba(
+                    palette.accent_primary.r(),
+                    palette.accent_primary.g(),
+                    palette.accent_primary.b(),
+                    40,
+                ),
                 sel_t,
             );
             p.rect_filled(brect, CornerRadius::same(10), badge_fill);
@@ -1075,7 +1385,6 @@ pub fn segmented_control<T: Copy + PartialEq>(
         16,
         Margin::same(3),
         |ui| {
-            // Reserve a shape slot behind the labels for the smoothly gliding glass thumb
             let thumb_slot = ui.painter().add(Shape::Noop);
             let mut seg_rects: Vec<Rect> = Vec::with_capacity(options.len());
             let mut active_idx = 0usize;
@@ -1135,7 +1444,6 @@ pub fn segmented_control<T: Copy + PartialEq>(
                     .ctx()
                     .animate_value_with_time(ctrl_id.with("w"), target_w, 0.22);
 
-                // Slight liquid stretch when gliding rapidly between segments
                 let velocity_stretch = ((target_rel_x - anim_x).abs() * 0.08).min(6.0);
                 let thumb_rect = Rect::from_min_size(
                     Pos2::new(base_x + anim_x - velocity_stretch * 0.5, target_rect.top()),
@@ -1175,7 +1483,6 @@ pub fn segmented_control<T: Copy + PartialEq>(
 }
 
 /// Recessed frosted capsule search field with painted magnifying glass and inline clear button.
-/// Returns `(response, cleared_clicked, enter_pressed)`.
 pub fn glass_search_bar(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -1310,7 +1617,9 @@ pub fn section_eyebrow(ui: &mut egui::Ui, palette: &Palette, text: &str) {
     );
 }
 
-/// Paints a macOS-style squircle glass app emblem for ModsUndBots.
+/// Bespoke **ModsUndBots** logo: an Apple Liquid Glass squircle housing a faceted
+/// Emerald-Prism Minecraft Cube with glowing twin Bot Visor eyes and a floating
+/// overhead Mod-Spark node.
 pub fn paint_app_emblem(ui: &mut egui::Ui, palette: &Palette, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     if !ui.is_rect_visible(rect) {
@@ -1318,44 +1627,212 @@ pub fn paint_app_emblem(ui: &mut egui::Ui, palette: &Palette, size: f32) {
     }
     let p = ui.painter();
     let cr = CornerRadius::same((size * 0.28) as u8);
+    let (_, orb_a, orb_b) = palette.preset.swatch_colors();
 
+    // Soft luminous drop glow
     let glow = Shadow {
         offset: [0, 4],
-        blur: 14,
+        blur: 16,
         spread: 0,
-        color: rgba(
-            palette.accent_blue.r(),
-            palette.accent_blue.g(),
-            palette.accent_blue.b(),
-            80,
-        ),
+        color: rgba(orb_a.r(), orb_a.g(), orb_a.b(), 95),
     };
     p.add(glow.as_shape(rect, cr));
 
-    p.rect_filled(rect, cr, rgba(22, 134, 255, 225));
-    let inner_orb = Pos2::new(rect.right() - size * 0.25, rect.bottom() - size * 0.25);
-    p.circle_filled(inner_orb, size * 0.36, rgba(48, 224, 152, 145));
+    // Deep obsidian-glass squircle base
+    p.rect_filled(rect, cr, Color32::from_rgb(10, 24, 30));
+
+    // Dual caustic orbs inside squircle
+    p.circle_filled(
+        Pos2::new(rect.left() + size * 0.26, rect.top() + size * 0.24),
+        size * 0.36,
+        rgba(orb_a.r(), orb_a.g(), orb_a.b(), 155),
+    );
+    p.circle_filled(
+        Pos2::new(rect.right() - size * 0.22, rect.bottom() - size * 0.22),
+        size * 0.34,
+        rgba(orb_b.r(), orb_b.g(), orb_b.b(), 145),
+    );
+
+    // Specular glass perimeter + top rim catchlight
     p.rect_stroke(
         rect,
         cr,
-        Stroke::new(1.0_f32, rgba(255, 255, 255, 165)),
+        Stroke::new(1.1_f32, rgba(255, 255, 255, 175)),
         StrokeKind::Inside,
     );
+    p.line_segment(
+        [
+            Pos2::new(rect.left() + size * 0.28, rect.top() + 1.0),
+            Pos2::new(rect.right() - size * 0.28, rect.top() + 1.0),
+        ],
+        Stroke::new(1.1_f32, rgba(255, 255, 255, 220)),
+    );
 
-    let c = rect.center();
-    let r = size * 0.26;
+    // Isometric 3-Faceted Crystal Cube (shifted slightly down to leave room for mod-spark)
+    let c = Pos2::new(rect.center().x, rect.center().y + size * 0.05);
+    let r = size * 0.27;
+    let dx = r * 0.88;
+    let dy = r * 0.46;
+
     let top = Pos2::new(c.x, c.y - r);
-    let tr = Pos2::new(c.x + r * 0.88, c.y - r * 0.45);
-    let br = Pos2::new(c.x + r * 0.88, c.y + r * 0.45);
+    let tr = Pos2::new(c.x + dx, c.y - dy);
+    let br = Pos2::new(c.x + dx, c.y + dy);
     let bot = Pos2::new(c.x, c.y + r);
-    let bl = Pos2::new(c.x - r * 0.88, c.y + r * 0.45);
-    let tl = Pos2::new(c.x - r * 0.88, c.y - r * 0.45);
+    let bl = Pos2::new(c.x - dx, c.y + dy);
+    let tl = Pos2::new(c.x - dx, c.y - dy);
 
-    let stroke = Stroke::new(1.6_f32, Color32::WHITE);
-    p.add(Shape::closed_line(vec![top, tr, br, bot, bl, tl], stroke));
-    p.line_segment([tl, c], stroke);
-    p.line_segment([tr, c], stroke);
-    p.line_segment([c, bot], stroke);
+    // Top crystal facet (brightest frosted mint-white)
+    p.add(Shape::convex_polygon(
+        vec![top, tr, c, tl],
+        rgba(230, 255, 248, 220),
+        Stroke::NONE,
+    ));
+    // Left facet (frosted luminous emerald/accent)
+    p.add(Shape::convex_polygon(
+        vec![tl, c, bot, bl],
+        rgba(orb_a.r(), orb_a.g(), orb_a.b(), 205),
+        Stroke::NONE,
+    ));
+    // Right facet (deep dark obsidian visor face for Bot Eyes)
+    p.add(Shape::convex_polygon(
+        vec![c, tr, br, bot],
+        rgba(10, 22, 30, 228),
+        Stroke::NONE,
+    ));
+
+    // Crisp prism wireframe highlight
+    let edge = Stroke::new(1.15_f32, rgba(255, 255, 255, 210));
+    p.add(Shape::closed_line(vec![top, tr, br, bot, bl, tl], edge));
+    p.line_segment([tl, c], edge);
+    p.line_segment([tr, c], edge);
+    p.line_segment([c, bot], edge);
+
+    // Twin glowing Bot Visor Eyes on the right facet
+    let eye_col = Color32::from_rgb(138, 255, 240);
+    let eye_r = (size * 0.042).max(1.5);
+    let eye1 = Pos2::new(c.x + dx * 0.34, c.y + dy * 0.28);
+    let eye2 = Pos2::new(c.x + dx * 0.72, c.y + dy * 0.06);
+    p.circle_filled(eye1, eye_r * 1.6, rgba(eye_col.r(), eye_col.g(), eye_col.b(), 80));
+    p.circle_filled(eye2, eye_r * 1.6, rgba(eye_col.r(), eye_col.g(), eye_col.b(), 80));
+    p.circle_filled(eye1, eye_r, eye_col);
+    p.circle_filled(eye2, eye_r, eye_col);
+
+    // Floating Mod-Spark diamond hovering above the cube crown
+    let spark_c = Pos2::new(c.x, top.y - size * 0.11);
+    let sr = size * 0.065;
+    p.add(Shape::convex_polygon(
+        vec![
+            Pos2::new(spark_c.x, spark_c.y - sr),
+            Pos2::new(spark_c.x + sr * 0.85, spark_c.y),
+            Pos2::new(spark_c.x, spark_c.y + sr),
+            Pos2::new(spark_c.x - sr * 0.85, spark_c.y),
+        ],
+        Color32::WHITE,
+        Stroke::NONE,
+    ));
+}
+
+/// Builds a crisp 64x64 RGBA OS window & taskbar icon matching the ModsUndBots
+/// Emerald-Prism Liquid Glass squircle logo.
+pub fn build_window_icon() -> IconData {
+    const N: usize = 64;
+    let mut rgba_buf = vec![0u8; N * N * 4];
+
+    let half = (N as f32) * 0.5;
+    let radius = 16.0_f32;
+    let box_half = half - 2.0;
+
+    for y in 0..N {
+        for x in 0..N {
+            let fx = (x as f32 + 0.5) - half;
+            let fy = (y as f32 + 0.5) - half;
+
+            // Signed distance to rounded squircle
+            let qx = fx.abs() - (box_half - radius);
+            let qy = fy.abs() - (box_half - radius);
+            let sdf = (qx.max(0.0).hypot(qy.max(0.0))) + qx.max(qy).min(0.0) - radius;
+            let cov = (0.75 - sdf).clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+
+            // Normalized [0, 1] coords
+            let u = (x as f32 + 0.5) / N as f32;
+            let v = (y as f32 + 0.5) / N as f32;
+
+            // Base obsidian-teal-emerald gradient
+            let mut r = 10.0 + (1.0 - u) * 18.0 + (1.0 - v) * 16.0;
+            let mut g = 28.0 + (1.0 - u) * 110.0 + (1.0 - v) * 48.0;
+            let mut b = 40.0 + u * 118.0 + (1.0 - v) * 36.0;
+
+            // Specular rim near squircle edge
+            if sdf > -1.8 {
+                let rim = ((sdf + 1.8) / 1.8).clamp(0.0, 1.0);
+                r += rim * 120.0;
+                g += rim * 145.0;
+                b += rim * 138.0;
+            }
+
+            // Isometric cube centered slightly below middle
+            let cx = fx;
+            let cy = fy - 2.5;
+            let s = 17.5_f32;
+            // Hexagonal projection coordinates
+            let in_hex = cx.abs() <= s * 0.88
+                && (cy + cx * 0.52).abs() <= s
+                && (cy - cx * 0.52).abs() <= s;
+
+            if in_hex {
+                if cy < -cx.abs() * 0.52 {
+                    // Top crystal facet
+                    r = 215.0;
+                    g = 252.0;
+                    b = 242.0;
+                } else if cx < 0.0 {
+                    // Left emerald prism facet
+                    r = 34.0;
+                    g = 216.0;
+                    b = 150.0;
+                } else {
+                    // Right dark bot visor facet
+                    r = 12.0;
+                    g = 26.0;
+                    b = 34.0;
+
+                    // Twin glowing bot visor eyes
+                    let d1 = (cx - 5.4).hypot(cy - 2.8);
+                    let d2 = (cx - 11.4).hypot(cy - 0.2);
+                    let eye = ((2.4 - d1).max(2.4 - d2)).clamp(0.0, 1.0);
+                    if eye > 0.0 {
+                        r = r * (1.0 - eye) + 140.0 * eye;
+                        g = g * (1.0 - eye) + 255.0 * eye;
+                        b = b * (1.0 - eye) + 242.0 * eye;
+                    }
+                }
+            }
+
+            // Floating mod-spark diamond above cube
+            let spark_d = fx.abs() + (fy + 22.0).abs();
+            if spark_d < 3.6 {
+                let sp = (3.6 - spark_d).clamp(0.0, 1.0);
+                r = r * (1.0 - sp) + 255.0 * sp;
+                g = g * (1.0 - sp) + 255.0 * sp;
+                b = b * (1.0 - sp) + 255.0 * sp;
+            }
+
+            let idx = (y * N + x) * 4;
+            rgba_buf[idx] = r.clamp(0.0, 255.0) as u8;
+            rgba_buf[idx + 1] = g.clamp(0.0, 255.0) as u8;
+            rgba_buf[idx + 2] = b.clamp(0.0, 255.0) as u8;
+            rgba_buf[idx + 3] = (cov * 255.0) as u8;
+        }
+    }
+
+    IconData {
+        rgba: rgba_buf,
+        width: N as u32,
+        height: N as u32,
+    }
 }
 
 /// Paints a circular frosted avatar emblem with initial(s) for profiles & accounts.
@@ -1413,7 +1890,7 @@ pub fn paint_icon_placeholder(ui: &mut egui::Ui, palette: &Palette, title: &str,
     let galley = p.layout_no_wrap(
         initial,
         egui::FontId::proportional(size * 0.42),
-        palette.accent_blue,
+        palette.accent_primary,
     );
     p.galley(
         Pos2::new(
@@ -1421,7 +1898,7 @@ pub fn paint_icon_placeholder(ui: &mut egui::Ui, palette: &Palette, title: &str,
             rect.center().y - galley.size().y * 0.5,
         ),
         galley,
-        palette.accent_blue,
+        palette.accent_primary,
     );
 }
 

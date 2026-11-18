@@ -1,3 +1,4 @@
+mod markdown;
 mod mods_view;
 mod theme;
 
@@ -11,7 +12,7 @@ use mub_core::{
     InstanceState, InstanceStatus, LauncherSettings, ModLoader, MsaAuthClient, Profile,
     ProfileKind, ProfileStore,
 };
-use theme::{ButtonTone, GlassElevation, GlassMode, NavIcon, Palette};
+use theme::{ButtonTone, GlassElevation, GlassMode, NavIcon, Palette, ThemePreset};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +47,8 @@ struct MubApp {
     profiles: ProfileStore,
     manager: InstanceManager,
 
-    glass_mode: GlassMode,
+    theme_preset: ThemePreset,
+    last_dark_preset: ThemePreset,
     active_tab: Tab,
     profile_filter: ProfileFilter,
     search_query: String,
@@ -82,8 +84,8 @@ struct MubApp {
 
 impl MubApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let glass_mode = GlassMode::Dark;
-        theme::apply_theme(&cc.egui_ctx, glass_mode);
+        let theme_preset = ThemePreset::EmeraldPrism;
+        theme::apply_theme(&cc.egui_ctx, theme_preset);
         let rt = Arc::new(
             tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"),
         );
@@ -117,7 +119,8 @@ impl MubApp {
             accounts,
             profiles,
             manager,
-            glass_mode,
+            theme_preset,
+            last_dark_preset: ThemePreset::EmeraldPrism,
             active_tab: Tab::Instances,
             profile_filter: ProfileFilter::All,
             search_query: String::new(),
@@ -145,10 +148,13 @@ impl MubApp {
         }
     }
 
-    fn set_glass_mode(&mut self, ctx: &egui::Context, mode: GlassMode) {
-        if self.glass_mode != mode {
-            self.glass_mode = mode;
-            theme::apply_theme(ctx, mode);
+    fn set_theme_preset(&mut self, ctx: &egui::Context, preset: ThemePreset) {
+        if self.theme_preset != preset {
+            self.theme_preset = preset;
+            if preset.mode() == GlassMode::Dark {
+                self.last_dark_preset = preset;
+            }
+            theme::apply_theme(ctx, preset);
         }
     }
 
@@ -315,8 +321,8 @@ impl MubApp {
 impl eframe::App for MubApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
-        let palette = Palette::for_mode(self.glass_mode);
-        theme::paint_liquid_backdrop(ctx, self.glass_mode);
+        let palette = Palette::for_preset(self.theme_preset);
+        theme::paint_liquid_backdrop(ctx, self.theme_preset);
 
         let running_count = self
             .statuses
@@ -324,7 +330,8 @@ impl eframe::App for MubApp {
             .filter(|s| matches!(s.state, InstanceState::Running | InstanceState::Preparing))
             .count();
 
-        let mut next_mode = self.glass_mode;
+        let current_mode = self.theme_preset.mode();
+        let mut next_mode = current_mode;
 
         // Floating Apple Liquid Glass Sidebar Island
         egui::SidePanel::left("sidebar")
@@ -476,8 +483,12 @@ impl eframe::App for MubApp {
                 );
             });
 
-        if next_mode != self.glass_mode {
-            self.set_glass_mode(ctx, next_mode);
+        if next_mode != current_mode {
+            let target = match next_mode {
+                GlassMode::Dark => self.last_dark_preset,
+                GlassMode::Light => ThemePreset::DaylightFrost,
+            };
+            self.set_theme_preset(ctx, target);
         }
 
         // Floating Liquid Glass Toast Notification
@@ -1360,38 +1371,32 @@ impl MubApp {
         );
         ui.add_space(14.0);
 
-        // Appearance Card
+        // Appearance & Brand Theme Card
         theme::glass_card(ui, palette, |ui| {
             ui.set_width(ui.available_width());
-            theme::section_eyebrow(ui, palette, "Appearance");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new("Liquid Glass Material")
-                            .size(14.0)
-                            .strong()
-                            .color(palette.text_primary),
-                    );
-                    ui.label(
-                        RichText::new("Switch between midnight obsidian glass and frosted daylight glass.")
-                            .size(12.0)
-                            .color(palette.text_muted),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut mode = self.glass_mode;
-                    if theme::segmented_control(
-                        ui,
-                        palette,
-                        "settings_glass_mode",
-                        &mut mode,
-                        &[(GlassMode::Dark, "Dark Glass"), (GlassMode::Light, "Light Glass")],
-                    ) {
-                        self.set_glass_mode(ctx, mode);
+            theme::section_eyebrow(ui, palette, "Liquid Glass Theme");
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Choose a ModsUndBots Liquid Glass atmosphere and accent palette.")
+                    .size(12.0)
+                    .color(palette.text_muted),
+            );
+            ui.add_space(10.0);
+
+            let mut chosen = self.theme_preset;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                for preset in ThemePreset::ALL {
+                    if theme::theme_swatch_card(ui, palette, preset, self.theme_preset == preset)
+                        .clicked()
+                    {
+                        chosen = preset;
                     }
-                });
+                }
             });
+            if chosen != self.theme_preset {
+                self.set_theme_preset(ctx, chosen);
+            }
         });
 
         ui.add_space(12.0);
@@ -1468,7 +1473,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1220.0, 780.0])
             .with_min_inner_size([960.0, 620.0])
-            .with_title("ModsUndBots Launcher"),
+            .with_title("ModsUndBots Launcher")
+            .with_icon(theme::build_window_icon()),
         ..Default::default()
     };
     eframe::run_native(

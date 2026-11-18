@@ -1156,16 +1156,12 @@ impl ModsViewState {
                         ui.add_space(12.0);
                     }
 
-                    // Project Body
+                    // Project Body (Rendered Markdown + HTML badges)
                     theme::glass_card(ui, palette, |ui| {
                         ui.set_width(ui.available_width());
                         theme::section_eyebrow(ui, palette, "Description");
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(&project.body)
-                                .size(12.5)
-                                .color(palette.text_primary),
-                        );
+                        ui.add_space(8.0);
+                        crate::markdown::render_markdown(ui, palette, &project.body);
                     });
                 });
             }
