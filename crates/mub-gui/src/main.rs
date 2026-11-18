@@ -430,6 +430,7 @@ impl eframe::App for MubApp {
                             theme::segmented_control(
                                 ui,
                                 &palette,
+                                "sidebar_glass_mode",
                                 &mut next_mode,
                                 &[(GlassMode::Dark, "Dark Glass"), (GlassMode::Light, "Light Glass")],
                             );
@@ -611,6 +612,7 @@ impl MubApp {
                 theme::segmented_control(
                     ui,
                     palette,
+                    "instances_profile_filter",
                     &mut self.profile_filter,
                     &[
                         (ProfileFilter::All, "All"),
@@ -662,6 +664,7 @@ impl MubApp {
                         if theme::segmented_control(
                             ui,
                             palette,
+                            "new_prof_kind_seg",
                             &mut self.new_prof_kind,
                             &[(ProfileKind::Player, "Player"), (ProfileKind::Bot, "Bot")],
                         ) {
@@ -681,7 +684,7 @@ impl MubApp {
 
                         ui.label(RichText::new("Mod Loader").color(palette.text_secondary));
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut self.new_prof_use_fabric, "Fabric");
+                            theme::glass_toggle(ui, palette, &mut self.new_prof_use_fabric, "Fabric");
                             if self.new_prof_use_fabric {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.new_prof_fabric_ver)
@@ -1075,6 +1078,7 @@ impl MubApp {
                 theme::segmented_control(
                     ui,
                     palette,
+                    "offline_role_seg",
                     &mut self.new_offline_role,
                     &[(AccountRole::Bot, "Bot"), (AccountRole::Player, "Player")],
                 );
@@ -1380,6 +1384,7 @@ impl MubApp {
                     if theme::segmented_control(
                         ui,
                         palette,
+                        "settings_glass_mode",
                         &mut mode,
                         &[(GlassMode::Dark, "Dark Glass"), (GlassMode::Light, "Light Glass")],
                     ) {

@@ -1,6 +1,7 @@
 use eframe::egui::{
-    self, Color32, CornerRadius, Margin, Mesh, Pos2, Rect, Response, Sense, Shadow, Shape, Stroke,
-    StrokeKind, Vec2,
+    self, Color32, ColorImage, CornerRadius, Id, Margin, Mesh, Pos2, Rect, Response, Sense, Shadow,
+    Shape, Stroke, StrokeKind, TextureFilter, TextureHandle, TextureOptions, TextureWrapMode, Vec2,
+    epaint::RectShape,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,16 +11,26 @@ pub enum GlassMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlassFinish {
+    /// Unpolished / satin etched frosted glass with milky diffusion and subtle micro-grain
+    Frosted,
+    /// Clear / polished refractive liquid glass with crisp specular catchlights
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlassElevation {
-    /// Floating sidebar / primary navigation island
+    /// Floating sidebar / primary navigation island (unpolished satin frost)
     FloatingIsland,
-    /// Standard content card
+    /// Standard content card (unpolished frosted matte glass)
     Card,
-    /// Elevated / interactive panel or sheet
+    /// Floating toolbar / filter bar (clear polished liquid glass)
+    Toolbar,
+    /// Elevated / interactive sheet or toast (clear polished liquid glass)
     Elevated,
     /// Recessed track (segmented controls, search bars, icon wells)
     Well,
-    /// Deep smoked glass for live log terminal
+    /// Deep smoked frosted glass for live log terminal
     Terminal,
 }
 
@@ -44,12 +55,17 @@ pub enum NavIcon {
 pub struct Palette {
     pub mode: GlassMode,
 
-    // Glass surfaces
+    // Unpolished / frosted matte glass surfaces (cloudier, satin finish)
     pub island_fill: Color32,
     pub card_fill: Color32,
-    pub elevated_fill: Color32,
     pub well_fill: Color32,
     pub terminal_fill: Color32,
+    pub frost_grain_tint: Color32,
+    pub frost_haze_top: Color32,
+
+    // Clear / polished liquid glass surfaces (more transparent, high specular)
+    pub toolbar_fill: Color32,
+    pub elevated_fill: Color32,
 
     // Optical borders & specular highlights
     pub border_subtle: Color32,
@@ -95,33 +111,50 @@ const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
     Color32::from_rgba_premultiplied(pr, pg, pb, a)
 }
 
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    Color32::from_rgba_premultiplied(
+        (a.r() as f32 * inv + b.r() as f32 * t).round() as u8,
+        (a.g() as f32 * inv + b.g() as f32 * t).round() as u8,
+        (a.b() as f32 * inv + b.b() as f32 * t).round() as u8,
+        (a.a() as f32 * inv + b.a() as f32 * t).round() as u8,
+    )
+}
+
 impl Palette {
     pub const fn for_mode(mode: GlassMode) -> Self {
         match mode {
             GlassMode::Dark => Self {
                 mode,
-                island_fill: rgba(24, 30, 48, 178),
-                card_fill: rgba(30, 38, 60, 148),
-                elevated_fill: rgba(40, 50, 76, 176),
-                well_fill: rgba(12, 16, 28, 148),
-                terminal_fill: rgba(10, 13, 22, 206),
+                // Unpolished / frosted matte surfaces (milky, diffused, less clear)
+                island_fill: rgba(34, 42, 62, 212),
+                card_fill: rgba(36, 44, 66, 188),
+                well_fill: rgba(14, 18, 30, 168),
+                terminal_fill: rgba(12, 15, 25, 224),
+                frost_grain_tint: rgba(230, 240, 255, 13),
+                frost_haze_top: rgba(220, 232, 255, 14),
 
-                border_subtle: rgba(255, 255, 255, 34),
-                border_bright: rgba(255, 255, 255, 76),
-                specular_top: rgba(255, 255, 255, 112),
-                sheen_top: rgba(255, 255, 255, 20),
+                // Clear / polished liquid glass surfaces (crisper translucency)
+                toolbar_fill: rgba(28, 36, 56, 132),
+                elevated_fill: rgba(40, 50, 76, 168),
+
+                border_subtle: rgba(255, 255, 255, 32),
+                border_bright: rgba(255, 255, 255, 84),
+                specular_top: rgba(255, 255, 255, 128),
+                sheen_top: rgba(255, 255, 255, 24),
                 divider: rgba(255, 255, 255, 26),
-                shadow_color: rgba(2, 5, 14, 105),
+                shadow_color: rgba(2, 5, 14, 108),
 
                 control_fill: rgba(255, 255, 255, 18),
-                control_hover: rgba(255, 255, 255, 36),
+                control_hover: rgba(255, 255, 255, 38),
                 control_active: rgba(10, 132, 255, 72),
-                segment_thumb_fill: rgba(255, 255, 255, 42),
-                segment_thumb_border: rgba(255, 255, 255, 92),
+                segment_thumb_fill: rgba(255, 255, 255, 44),
+                segment_thumb_border: rgba(255, 255, 255, 108),
 
                 text_primary: Color32::from_rgb(245, 248, 255),
-                text_secondary: rgba(235, 242, 255, 205),
-                text_muted: rgba(196, 210, 238, 150),
+                text_secondary: rgba(235, 242, 255, 208),
+                text_muted: rgba(196, 210, 238, 154),
                 text_on_accent: Color32::WHITE,
 
                 accent_blue: Color32::from_rgb(56, 162, 255),
@@ -130,32 +163,38 @@ impl Palette {
                 accent_amber: Color32::from_rgb(255, 198, 56),
                 accent_red: Color32::from_rgb(255, 92, 92),
 
-                primary_glass_fill: rgba(24, 144, 255, 208),
-                primary_glass_hover: rgba(54, 164, 255, 232),
-                primary_glass_border: rgba(176, 224, 255, 180),
-                danger_glass_fill: rgba(226, 58, 66, 202),
-                danger_glass_hover: rgba(244, 78, 86, 228),
-                danger_glass_border: rgba(255, 178, 182, 165),
+                primary_glass_fill: rgba(24, 144, 255, 212),
+                primary_glass_hover: rgba(56, 166, 255, 238),
+                primary_glass_border: rgba(180, 226, 255, 188),
+                danger_glass_fill: rgba(226, 58, 66, 206),
+                danger_glass_hover: rgba(244, 78, 86, 232),
+                danger_glass_border: rgba(255, 178, 182, 170),
             },
             GlassMode::Light => Self {
                 mode,
-                island_fill: rgba(255, 255, 255, 182),
-                card_fill: rgba(255, 255, 255, 156),
-                elevated_fill: rgba(255, 255, 255, 205),
-                well_fill: rgba(214, 226, 246, 132),
-                terminal_fill: rgba(18, 23, 36, 224),
+                // Unpolished / frosted matte surfaces (milky sandblasted daylight glass)
+                island_fill: rgba(246, 250, 255, 214),
+                card_fill: rgba(248, 251, 255, 196),
+                well_fill: rgba(206, 220, 242, 148),
+                terminal_fill: rgba(18, 23, 36, 230),
+                frost_grain_tint: rgba(80, 105, 145, 14),
+                frost_haze_top: rgba(255, 255, 255, 58),
 
-                border_subtle: rgba(255, 255, 255, 175),
-                border_bright: rgba(255, 255, 255, 235),
-                specular_top: rgba(255, 255, 255, 245),
-                sheen_top: rgba(255, 255, 255, 76),
+                // Clear / polished liquid glass surfaces
+                toolbar_fill: rgba(255, 255, 255, 138),
+                elevated_fill: rgba(255, 255, 255, 186),
+
+                border_subtle: rgba(255, 255, 255, 185),
+                border_bright: rgba(255, 255, 255, 245),
+                specular_top: rgba(255, 255, 255, 252),
+                sheen_top: rgba(255, 255, 255, 84),
                 divider: rgba(30, 50, 88, 26),
                 shadow_color: rgba(28, 48, 92, 34),
 
-                control_fill: rgba(255, 255, 255, 138),
-                control_hover: rgba(255, 255, 255, 204),
+                control_fill: rgba(255, 255, 255, 142),
+                control_hover: rgba(255, 255, 255, 212),
                 control_active: rgba(0, 122, 255, 44),
-                segment_thumb_fill: rgba(255, 255, 255, 235),
+                segment_thumb_fill: rgba(255, 255, 255, 238),
                 segment_thumb_border: rgba(255, 255, 255, 255),
 
                 text_primary: Color32::from_rgb(20, 28, 46),
@@ -169,15 +208,55 @@ impl Palette {
                 accent_amber: Color32::from_rgb(204, 126, 0),
                 accent_red: Color32::from_rgb(220, 48, 48),
 
-                primary_glass_fill: rgba(0, 122, 255, 222),
-                primary_glass_hover: rgba(24, 138, 255, 242),
-                primary_glass_border: rgba(164, 214, 255, 210),
+                primary_glass_fill: rgba(0, 122, 255, 224),
+                primary_glass_hover: rgba(24, 138, 255, 244),
+                primary_glass_border: rgba(164, 214, 255, 215),
                 danger_glass_fill: rgba(226, 54, 58, 218),
-                danger_glass_hover: rgba(242, 72, 76, 238),
+                danger_glass_hover: rgba(242, 72, 76, 240),
                 danger_glass_border: rgba(255, 188, 190, 200),
             },
         }
     }
+}
+
+/// Lazily creates and caches a seamless 64x64 procedural micro-frost grain texture
+/// used on unpolished / matte frosted glass surfaces.
+fn frost_grain_texture(ctx: &egui::Context) -> TextureHandle {
+    let key = Id::new("mub_frost_grain_tex_v1");
+    if let Some(tex) = ctx.data(|d| d.get_temp::<TextureHandle>(key)) {
+        return tex;
+    }
+
+    const N: usize = 64;
+    let mut pixels = vec![Color32::TRANSPARENT; N * N];
+    for y in 0..N {
+        for x in 0..N {
+            // Deterministic low-discrepancy hash for fine sandblasted glass grain
+            let mut h = (x as u32).wrapping_mul(374_761_393)
+                ^ (y as u32).wrapping_mul(668_265_263)
+                ^ 0x9E37_79B9;
+            h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+            h ^= h >> 16;
+            let v = (h & 0xFF) as u8;
+            // Subtle high-frequency frosted speckle
+            let alpha = if v > 150 { ((v - 150) as u16 * 2).min(255) as u8 } else { 0 };
+            pixels[y * N + x] = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+        }
+    }
+
+    let img = ColorImage {
+        size: [N, N],
+        pixels,
+    };
+    let opts = TextureOptions {
+        magnification: TextureFilter::Nearest,
+        minification: TextureFilter::Nearest,
+        wrap_mode: TextureWrapMode::Repeat,
+        mipmap_mode: None,
+    };
+    let tex = ctx.load_texture("mub_frost_grain", img, opts);
+    ctx.data_mut(|d| d.insert_temp(key, tex.clone()));
+    tex
 }
 
 pub fn apply_theme(ctx: &egui::Context, mode: GlassMode) {
@@ -188,6 +267,7 @@ pub fn apply_theme(ctx: &egui::Context, mode: GlassMode) {
     style.spacing.window_margin = Margin::same(16);
     style.spacing.interact_size.y = 28.0;
     style.spacing.combo_height = 240.0;
+    style.animation_time = 0.22;
 
     let mut visuals = match mode {
         GlassMode::Dark => egui::Visuals::dark(),
@@ -328,16 +408,16 @@ pub fn paint_liquid_backdrop(ctx: &egui::Context, mode: GlassMode) {
     let h = rect.height();
     let orbs: &[CausticOrb] = match mode {
         GlassMode::Dark => &[
-            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.34, rgb: (40, 175, 255), peak_alpha: 34 },
-            CausticOrb { fx: 0.84, fy: 0.20, fr: 0.38, rgb: (142, 92, 255), peak_alpha: 32 },
-            CausticOrb { fx: 0.76, fy: 0.84, fr: 0.36, rgb: (36, 214, 152), peak_alpha: 28 },
-            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.30, rgb: (48, 128, 255), peak_alpha: 24 },
+            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.34, rgb: (40, 175, 255), peak_alpha: 36 },
+            CausticOrb { fx: 0.84, fy: 0.20, fr: 0.38, rgb: (142, 92, 255), peak_alpha: 34 },
+            CausticOrb { fx: 0.76, fy: 0.84, fr: 0.36, rgb: (36, 214, 152), peak_alpha: 30 },
+            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.30, rgb: (48, 128, 255), peak_alpha: 26 },
         ],
         GlassMode::Light => &[
-            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.38, rgb: (112, 198, 255), peak_alpha: 62 },
-            CausticOrb { fx: 0.84, fy: 0.20, fr: 0.40, rgb: (192, 152, 255), peak_alpha: 54 },
-            CausticOrb { fx: 0.76, fy: 0.84, fr: 0.38, rgb: (112, 232, 192), peak_alpha: 54 },
-            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.32, rgb: (132, 184, 255), peak_alpha: 48 },
+            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.38, rgb: (112, 198, 255), peak_alpha: 64 },
+            CausticOrb { fx: 0.84, fy: 0.20, fr: 0.40, rgb: (192, 152, 255), peak_alpha: 56 },
+            CausticOrb { fx: 0.76, fy: 0.84, fr: 0.38, rgb: (112, 232, 192), peak_alpha: 56 },
+            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.32, rgb: (132, 184, 255), peak_alpha: 50 },
         ],
     };
 
@@ -357,9 +437,9 @@ pub fn paint_liquid_backdrop(ctx: &egui::Context, mode: GlassMode) {
     }
 }
 
-/// Renders a true multi-layered Apple Liquid Glass container:
-/// ambient drop shadow + frosted translucent body + subtle top optical sheen +
-/// refractive inner border + crisp specular top catchlight.
+/// Renders a multi-layered Apple Liquid Glass container supporting both
+/// **Unpolished / Frosted** satin matte glass (with micro-grain texture & soft haze)
+/// and **Clear / Polished** liquid glass (with crisp specular rim highlights).
 pub fn glass_box<R>(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -378,15 +458,52 @@ pub fn glass_box<R>(
     let cr = CornerRadius::same(radius);
     let r_f32 = radius as f32;
 
-    let (fill, border, shadow_blur, shadow_y, draw_sheen) = match elevation {
-        GlassElevation::FloatingIsland => (palette.island_fill, palette.border_bright, 28, 10, true),
-        GlassElevation::Card => (palette.card_fill, palette.border_subtle, 18, 6, true),
-        GlassElevation::Elevated => (palette.elevated_fill, palette.border_bright, 24, 8, true),
-        GlassElevation::Well => (palette.well_fill, palette.border_subtle, 0, 0, false),
-        GlassElevation::Terminal => (palette.terminal_fill, palette.border_subtle, 20, 8, true),
+    let (fill, border, shadow_blur, shadow_y, finish) = match elevation {
+        GlassElevation::FloatingIsland => (
+            palette.island_fill,
+            palette.border_bright,
+            26,
+            10,
+            GlassFinish::Frosted,
+        ),
+        GlassElevation::Card => (
+            palette.card_fill,
+            palette.border_subtle,
+            16,
+            5,
+            GlassFinish::Frosted,
+        ),
+        GlassElevation::Toolbar => (
+            palette.toolbar_fill,
+            palette.border_bright,
+            18,
+            6,
+            GlassFinish::Clear,
+        ),
+        GlassElevation::Elevated => (
+            palette.elevated_fill,
+            palette.border_bright,
+            24,
+            8,
+            GlassFinish::Clear,
+        ),
+        GlassElevation::Well => (
+            palette.well_fill,
+            palette.border_subtle,
+            0,
+            0,
+            GlassFinish::Frosted,
+        ),
+        GlassElevation::Terminal => (
+            palette.terminal_fill,
+            palette.border_subtle,
+            20,
+            8,
+            GlassFinish::Frosted,
+        ),
     };
 
-    let mut shapes = Vec::with_capacity(5);
+    let mut shapes = Vec::with_capacity(6);
 
     // 1. Soft ambient drop shadow
     if shadow_blur > 0 {
@@ -399,29 +516,95 @@ pub fn glass_box<R>(
         shapes.push(Shape::Rect(shadow.as_shape(rect, cr)));
     }
 
-    // 2. Frosted translucent body
+    // 2. Translucent body
     shapes.push(Shape::rect_filled(rect, cr, fill));
 
-    // 3. Subtle top optical sheen (simulates curved glass catching overhead light)
-    if draw_sheen && rect.height() > 24.0 && rect.width() > 24.0 {
-        let sheen_h = (rect.height() * 0.36).clamp(14.0, 44.0);
-        let inset = 1.5_f32;
-        let top_rect = Rect::from_min_max(
-            Pos2::new(rect.left() + inset, rect.top() + inset),
-            Pos2::new(rect.right() - inset, (rect.top() + sheen_h).min(rect.bottom() - inset)),
-        );
-        let mut sheen = Mesh::default();
-        let top_col = palette.sheen_top;
-        let bot_col = Color32::TRANSPARENT;
-        // Inset horizontally by a fraction of corner radius so sheen sits cleanly inside rounded corners
-        let corner_pad = (r_f32 * 0.45).min(top_rect.width() * 0.25);
-        sheen.colored_vertex(Pos2::new(top_rect.left() + corner_pad, top_rect.top()), top_col);
-        sheen.colored_vertex(Pos2::new(top_rect.right() - corner_pad, top_rect.top()), top_col);
-        sheen.colored_vertex(Pos2::new(top_rect.left(), top_rect.bottom()), bot_col);
-        sheen.colored_vertex(Pos2::new(top_rect.right(), top_rect.bottom()), bot_col);
-        sheen.add_triangle(0, 1, 3);
-        sheen.add_triangle(0, 3, 2);
-        shapes.push(Shape::mesh(sheen));
+    // 3. Material finish layer:
+    //    - Frosted (unpolished): tiled sandblasted micro-grain + wide diffused satin haze
+    //    - Clear (polished): tight overhead liquid sheen + crisp specular top catchlight
+    match finish {
+        GlassFinish::Frosted => {
+            // Tiled micro-frost grain clipped cleanly to the rounded rect
+            if rect.width() > 8.0 && rect.height() > 8.0 {
+                let grain_tex = frost_grain_texture(ui.ctx());
+                let uv = Rect::from_min_max(
+                    Pos2::ZERO,
+                    Pos2::new(rect.width() / 64.0, rect.height() / 64.0),
+                );
+                let grain_shape =
+                    RectShape::filled(rect, cr, palette.frost_grain_tint).with_texture(grain_tex.id(), uv);
+                shapes.push(Shape::Rect(grain_shape));
+            }
+
+            // Wide, diffused satin frost haze (no harsh mirror glare)
+            if elevation != GlassElevation::Well && rect.height() > 28.0 && rect.width() > 28.0 {
+                let haze_h = (rect.height() * 0.55).clamp(18.0, 96.0);
+                let inset = 1.5_f32;
+                let top_rect = Rect::from_min_max(
+                    Pos2::new(rect.left() + inset, rect.top() + inset),
+                    Pos2::new(
+                        rect.right() - inset,
+                        (rect.top() + haze_h).min(rect.bottom() - inset),
+                    ),
+                );
+                let mut haze = Mesh::default();
+                let corner_pad = (r_f32 * 0.45).min(top_rect.width() * 0.25);
+                haze.colored_vertex(
+                    Pos2::new(top_rect.left() + corner_pad, top_rect.top()),
+                    palette.frost_haze_top,
+                );
+                haze.colored_vertex(
+                    Pos2::new(top_rect.right() - corner_pad, top_rect.top()),
+                    palette.frost_haze_top,
+                );
+                haze.colored_vertex(
+                    Pos2::new(top_rect.left(), top_rect.bottom()),
+                    Color32::TRANSPARENT,
+                );
+                haze.colored_vertex(
+                    Pos2::new(top_rect.right(), top_rect.bottom()),
+                    Color32::TRANSPARENT,
+                );
+                haze.add_triangle(0, 1, 3);
+                haze.add_triangle(0, 3, 2);
+                shapes.push(Shape::mesh(haze));
+            }
+        }
+        GlassFinish::Clear => {
+            // Crisp liquid sheen along upper third
+            if rect.height() > 24.0 && rect.width() > 24.0 {
+                let sheen_h = (rect.height() * 0.34).clamp(12.0, 40.0);
+                let inset = 1.5_f32;
+                let top_rect = Rect::from_min_max(
+                    Pos2::new(rect.left() + inset, rect.top() + inset),
+                    Pos2::new(
+                        rect.right() - inset,
+                        (rect.top() + sheen_h).min(rect.bottom() - inset),
+                    ),
+                );
+                let mut sheen = Mesh::default();
+                let corner_pad = (r_f32 * 0.45).min(top_rect.width() * 0.25);
+                sheen.colored_vertex(
+                    Pos2::new(top_rect.left() + corner_pad, top_rect.top()),
+                    palette.sheen_top,
+                );
+                sheen.colored_vertex(
+                    Pos2::new(top_rect.right() - corner_pad, top_rect.top()),
+                    palette.sheen_top,
+                );
+                sheen.colored_vertex(
+                    Pos2::new(top_rect.left(), top_rect.bottom()),
+                    Color32::TRANSPARENT,
+                );
+                sheen.colored_vertex(
+                    Pos2::new(top_rect.right(), top_rect.bottom()),
+                    Color32::TRANSPARENT,
+                );
+                sheen.add_triangle(0, 1, 3);
+                sheen.add_triangle(0, 3, 2);
+                shapes.push(Shape::mesh(sheen));
+            }
+        }
     }
 
     // 4. Refractive hairline perimeter border
@@ -432,14 +615,23 @@ pub fn glass_box<R>(
         StrokeKind::Inside,
     ));
 
-    // 5. Crisp specular top catchlight along the top edge
-    if draw_sheen && rect.width() > r_f32 * 2.0 + 12.0 {
+    // 5. Specular top catchlight (brighter on Clear glass, softer satin on Frosted glass)
+    if elevation != GlassElevation::Well && rect.width() > r_f32 * 2.0 + 12.0 {
         let y = rect.top() + 1.0;
         let x0 = rect.left() + r_f32.max(10.0);
         let x1 = rect.right() - r_f32.max(10.0);
+        let rim_col = match finish {
+            GlassFinish::Clear => palette.specular_top,
+            GlassFinish::Frosted => rgba(
+                palette.specular_top.r(),
+                palette.specular_top.g(),
+                palette.specular_top.b(),
+                palette.specular_top.a() / 2,
+            ),
+        };
         shapes.push(Shape::line_segment(
             [Pos2::new(x0, y), Pos2::new(x1, y)],
-            Stroke::new(1.0_f32, palette.specular_top),
+            Stroke::new(1.0_f32, rim_col),
         ));
     }
 
@@ -485,7 +677,7 @@ pub fn glass_toolbar<R>(
     glass_box(
         ui,
         palette,
-        GlassElevation::Card,
+        GlassElevation::Toolbar,
         18,
         Margin::symmetric(14, 10),
         add_contents,
@@ -522,7 +714,8 @@ pub fn glass_terminal<R>(
     )
 }
 
-/// Apple Liquid Glass capsule button with specular rim and tone presets.
+/// Apple Liquid Glass capsule button with smooth animated hover/press transitions
+/// and specular top catchlight.
 pub fn pill_button(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -564,42 +757,51 @@ pub fn pill_button(
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
     if ui.is_rect_visible(rect) {
-        let cr = CornerRadius::same((rect.height() * 0.5) as u8);
-        let bg = if resp.is_pointer_button_down_on() || resp.hovered() {
-            hover_fill
-        } else {
-            fill
-        };
+        let hover_t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.14);
+        let press_t = ui.ctx().animate_bool_with_time(
+            resp.id.with("press"),
+            resp.is_pointer_button_down_on(),
+            0.09,
+        );
+
+        // Subtle tactile shrink on press like iOS/macOS buttons
+        let draw_rect = rect.shrink(press_t * 0.9);
+        let cr = CornerRadius::same((draw_rect.height() * 0.5) as u8);
+        let bg = lerp_color(fill, hover_fill, (hover_t + press_t * 0.5).min(1.0));
 
         let p = ui.painter();
         if matches!(tone, ButtonTone::Primary | ButtonTone::Danger) {
+            let glow_alpha = (56.0 + hover_t * 40.0) as u8;
             let glow = Shadow {
                 offset: [0, 3],
-                blur: 12,
+                blur: (12.0 + hover_t * 5.0) as u8,
                 spread: 0,
-                color: rgba(fill.r(), fill.g(), fill.b(), 64),
+                color: rgba(fill.r(), fill.g(), fill.b(), glow_alpha),
             };
-            p.add(glow.as_shape(rect, cr));
+            p.add(glow.as_shape(draw_rect, cr));
         }
 
-        p.rect_filled(rect, cr, bg);
-        p.rect_stroke(rect, cr, Stroke::new(1.0_f32, stroke_col), StrokeKind::Inside);
+        p.rect_filled(draw_rect, cr, bg);
+        let stroke_a = lerp_color(stroke_col, Color32::WHITE, hover_t * 0.25);
+        p.rect_stroke(draw_rect, cr, Stroke::new(1.0_f32, stroke_a), StrokeKind::Inside);
 
         // Specular top catchlight on capsule
-        if bg != Color32::TRANSPARENT {
-            let pad = rect.height() * 0.45;
+        if bg.a() > 0 {
+            let pad = draw_rect.height() * 0.45;
             p.line_segment(
                 [
-                    Pos2::new(rect.left() + pad, rect.top() + 1.0),
-                    Pos2::new(rect.right() - pad, rect.top() + 1.0),
+                    Pos2::new(draw_rect.left() + pad, draw_rect.top() + 1.0),
+                    Pos2::new(draw_rect.right() - pad, draw_rect.top() + 1.0),
                 ],
-                Stroke::new(1.0_f32, rgba(255, 255, 255, 110)),
+                Stroke::new(1.0_f32, rgba(255, 255, 255, (96.0 + hover_t * 50.0) as u8)),
             );
         }
 
         let text_pos = Pos2::new(
-            rect.center().x - galley.size().x * 0.5,
-            rect.center().y - galley.size().y * 0.5,
+            draw_rect.center().x - galley.size().x * 0.5,
+            draw_rect.center().y - galley.size().y * 0.5,
         );
         p.galley(text_pos, galley, text_col);
     }
@@ -607,7 +809,125 @@ pub fn pill_button(
     resp
 }
 
-/// Full-width sidebar capsule button with painted vector icon and optional count badge.
+/// Apple Liquid Glass animated pill toggle switch (with iOS 26-style liquid thumb glide & stretch).
+pub fn glass_toggle(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    on: &mut bool,
+    label: &str,
+) -> Response {
+    let mut changed = false;
+    let resp = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+
+            let desired = Vec2::new(42.0, 24.0);
+            let (rect, switch_resp) = ui.allocate_exact_size(desired, Sense::click());
+            if switch_resp.clicked() {
+                *on = !*on;
+                changed = true;
+            }
+
+            if ui.is_rect_visible(rect) {
+                let t = ui
+                    .ctx()
+                    .animate_bool_with_time(switch_resp.id.with("toggle"), *on, 0.22);
+                let hover_t = ui.ctx().animate_bool_with_time(
+                    switch_resp.id.with("hover"),
+                    switch_resp.hovered(),
+                    0.14,
+                );
+                let press_t = ui.ctx().animate_bool_with_time(
+                    switch_resp.id.with("press"),
+                    switch_resp.is_pointer_button_down_on(),
+                    0.10,
+                );
+
+                // Mid-motion liquid stretch peaks at t == 0.5 or while pressed
+                let motion_stretch = (1.0 - (2.0 * t - 1.0).abs()) * 5.0 + press_t * 3.5;
+
+                let p = ui.painter();
+                let track_cr = CornerRadius::same((rect.height() * 0.5) as u8);
+                let off_track = palette.well_fill;
+                let on_track = rgba(
+                    palette.accent_emerald.r(),
+                    palette.accent_emerald.g(),
+                    palette.accent_emerald.b(),
+                    215,
+                );
+                let track_fill = lerp_color(off_track, on_track, t);
+                let track_border = lerp_color(
+                    palette.border_subtle,
+                    rgba(180, 255, 215, 165),
+                    t.max(hover_t * 0.4),
+                );
+
+                p.rect_filled(rect, track_cr, track_fill);
+                p.rect_stroke(
+                    rect,
+                    track_cr,
+                    Stroke::new(1.0_f32, track_border),
+                    StrokeKind::Inside,
+                );
+
+                // Liquid glass thumb (glides smoothly + stretches horizontally mid-transition)
+                let pad = 2.5_f32;
+                let base_d = rect.height() - pad * 2.0;
+                let thumb_w = base_d + motion_stretch;
+                let min_x = rect.left() + pad;
+                let max_x = rect.right() - pad - thumb_w;
+                let thumb_x = min_x + (max_x - min_x) * t;
+                let thumb_rect = Rect::from_min_size(
+                    Pos2::new(thumb_x, rect.top() + pad),
+                    Vec2::new(thumb_w, base_d),
+                );
+                let thumb_cr = CornerRadius::same((base_d * 0.5) as u8);
+
+                let thumb_shadow = Shadow {
+                    offset: [0, 2],
+                    blur: 8,
+                    spread: 0,
+                    color: rgba(0, 0, 0, 72),
+                };
+                p.add(thumb_shadow.as_shape(thumb_rect, thumb_cr));
+
+                let thumb_fill = rgba(255, 255, 255, 240);
+                p.rect_filled(thumb_rect, thumb_cr, thumb_fill);
+                p.rect_stroke(
+                    thumb_rect,
+                    thumb_cr,
+                    Stroke::new(1.0_f32, Color32::WHITE),
+                    StrokeKind::Inside,
+                );
+            }
+
+            if !label.is_empty() {
+                let lbl_resp = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(label)
+                            .size(13.0)
+                            .color(palette.text_primary),
+                    )
+                    .sense(Sense::click()),
+                );
+                if lbl_resp.clicked() {
+                    *on = !*on;
+                    changed = true;
+                }
+            }
+
+            switch_resp
+        })
+        .inner;
+
+    if changed {
+        ui.ctx().request_repaint();
+    }
+    resp
+}
+
+/// Full-width sidebar capsule button with smooth animated hover/selection transitions,
+/// painted vector icon, and optional count badge.
 pub fn nav_pill(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -620,56 +940,74 @@ pub fn nav_pill(
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
     if ui.is_rect_visible(rect) {
+        let sel_t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("sel"), selected, 0.20);
+        let hov_t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("hov"), resp.hovered() && !selected, 0.14);
+
         let cr = CornerRadius::same(14);
         let p = ui.painter();
 
-        if selected {
-            let fill = match palette.mode {
-                GlassMode::Dark => rgba(255, 255, 255, 34),
-                GlassMode::Light => rgba(255, 255, 255, 224),
+        if sel_t > 0.01 {
+            let active_fill = match palette.mode {
+                GlassMode::Dark => rgba(255, 255, 255, (42.0 * sel_t) as u8),
+                GlassMode::Light => rgba(255, 255, 255, (232.0 * sel_t) as u8),
             };
             let shadow = Shadow {
                 offset: [0, 3],
                 blur: 10,
                 spread: 0,
-                color: palette.shadow_color,
+                color: rgba(
+                    palette.shadow_color.r(),
+                    palette.shadow_color.g(),
+                    palette.shadow_color.b(),
+                    (palette.shadow_color.a() as f32 * sel_t) as u8,
+                ),
             };
             p.add(shadow.as_shape(rect, cr));
-            p.rect_filled(rect, cr, fill);
+            p.rect_filled(rect, cr, active_fill);
             p.rect_stroke(
                 rect,
                 cr,
-                Stroke::new(1.0_f32, palette.border_bright),
+                Stroke::new(
+                    1.0_f32,
+                    lerp_color(Color32::TRANSPARENT, palette.border_bright, sel_t),
+                ),
                 StrokeKind::Inside,
             );
-            // Specular highlight along top of selected pill
             p.line_segment(
                 [
                     Pos2::new(rect.left() + 14.0, rect.top() + 1.0),
                     Pos2::new(rect.right() - 14.0, rect.top() + 1.0),
                 ],
-                Stroke::new(1.0_f32, palette.specular_top),
+                Stroke::new(
+                    1.0_f32,
+                    lerp_color(Color32::TRANSPARENT, palette.specular_top, sel_t),
+                ),
             );
-        } else if resp.hovered() {
-            p.rect_filled(rect, cr, palette.control_fill);
+        }
+
+        if hov_t > 0.01 {
+            p.rect_filled(
+                rect,
+                cr,
+                lerp_color(Color32::TRANSPARENT, palette.control_fill, hov_t),
+            );
             p.rect_stroke(
                 rect,
                 cr,
-                Stroke::new(1.0_f32, palette.border_subtle),
+                Stroke::new(
+                    1.0_f32,
+                    lerp_color(Color32::TRANSPARENT, palette.border_subtle, hov_t),
+                ),
                 StrokeKind::Inside,
             );
         }
 
-        let icon_color = if selected {
-            palette.accent_blue
-        } else {
-            palette.text_muted
-        };
-        let text_color = if selected {
-            palette.text_primary
-        } else {
-            palette.text_secondary
-        };
+        let icon_color = lerp_color(palette.text_muted, palette.accent_blue, sel_t.max(hov_t * 0.4));
+        let text_color = lerp_color(palette.text_secondary, palette.text_primary, sel_t.max(hov_t * 0.6));
 
         let icon_center = Pos2::new(rect.left() + 20.0, rect.center().y);
         paint_nav_icon(p, icon_center, icon, icon_color);
@@ -687,14 +1025,11 @@ pub fn nav_pill(
 
         if let Some(count) = badge_count {
             let count_str = count.to_string();
+            let badge_text_col = lerp_color(palette.text_muted, palette.accent_blue, sel_t);
             let badge_galley = p.layout_no_wrap(
                 count_str,
                 egui::FontId::proportional(11.0),
-                if selected {
-                    palette.accent_blue
-                } else {
-                    palette.text_muted
-                },
+                badge_text_col,
             );
             let bw = (badge_galley.size().x + 14.0).max(24.0);
             let bh = 20.0;
@@ -702,11 +1037,11 @@ pub fn nav_pill(
                 Pos2::new(rect.right() - bw - 10.0, rect.center().y - bh * 0.5),
                 Vec2::new(bw, bh),
             );
-            let badge_fill = if selected {
-                rgba(palette.accent_blue.r(), palette.accent_blue.g(), palette.accent_blue.b(), 36)
-            } else {
-                palette.well_fill
-            };
+            let badge_fill = lerp_color(
+                palette.well_fill,
+                rgba(palette.accent_blue.r(), palette.accent_blue.g(), palette.accent_blue.b(), 40),
+                sel_t,
+            );
             p.rect_filled(brect, CornerRadius::same(10), badge_fill);
             p.galley(
                 Pos2::new(
@@ -714,11 +1049,7 @@ pub fn nav_pill(
                     brect.center().y - badge_galley.size().y * 0.5,
                 ),
                 badge_galley,
-                if selected {
-                    palette.accent_blue
-                } else {
-                    palette.text_muted
-                },
+                badge_text_col,
             );
         }
     }
@@ -726,14 +1057,17 @@ pub fn nav_pill(
     resp
 }
 
-/// Apple Liquid Glass segmented control inside a recessed frosted capsule track.
+/// Apple Liquid Glass segmented control with a smoothly gliding clear-glass pill thumb.
 pub fn segmented_control<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     palette: &Palette,
+    id_salt: &str,
     current: &mut T,
     options: &[(T, &str)],
 ) -> bool {
     let mut changed = false;
+    let ctrl_id = ui.make_persistent_id(id_salt);
+
     glass_box(
         ui,
         palette,
@@ -741,10 +1075,18 @@ pub fn segmented_control<T: Copy + PartialEq>(
         16,
         Margin::same(3),
         |ui| {
+            // Reserve a shape slot behind the labels for the smoothly gliding glass thumb
+            let thumb_slot = ui.painter().add(Shape::Noop);
+            let mut seg_rects: Vec<Rect> = Vec::with_capacity(options.len());
+            let mut active_idx = 0usize;
+
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for &(value, label) in options {
+                for (idx, &(value, label)) in options.iter().enumerate() {
                     let selected = *current == value;
+                    if selected {
+                        active_idx = idx;
+                    }
                     let text_col = if selected {
                         palette.text_primary
                     } else {
@@ -757,19 +1099,12 @@ pub fn segmented_control<T: Copy + PartialEq>(
                     );
                     let size = Vec2::new(galley.size().x + 22.0, 26.0);
                     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+                    seg_rects.push(rect);
+
                     if ui.is_rect_visible(rect) {
-                        let cr = CornerRadius::same(13);
                         let p = ui.painter();
-                        if selected {
-                            p.rect_filled(rect, cr, palette.segment_thumb_fill);
-                            p.rect_stroke(
-                                rect,
-                                cr,
-                                Stroke::new(1.0_f32, palette.segment_thumb_border),
-                                StrokeKind::Inside,
-                            );
-                        } else if resp.hovered() {
-                            p.rect_filled(rect, cr, palette.control_fill);
+                        if !selected && resp.hovered() {
+                            p.rect_filled(rect, CornerRadius::same(13), palette.control_fill);
                         }
                         p.galley(
                             Pos2::new(
@@ -782,10 +1117,58 @@ pub fn segmented_control<T: Copy + PartialEq>(
                     }
                     if resp.clicked() && !selected {
                         *current = value;
+                        active_idx = idx;
                         changed = true;
                     }
                 }
             });
+
+            if let Some(target_rect) = seg_rects.get(active_idx) {
+                let base_x = seg_rects[0].left();
+                let target_rel_x = target_rect.left() - base_x;
+                let target_w = target_rect.width();
+
+                let anim_x = ui
+                    .ctx()
+                    .animate_value_with_time(ctrl_id.with("x"), target_rel_x, 0.22);
+                let anim_w = ui
+                    .ctx()
+                    .animate_value_with_time(ctrl_id.with("w"), target_w, 0.22);
+
+                // Slight liquid stretch when gliding rapidly between segments
+                let velocity_stretch = ((target_rel_x - anim_x).abs() * 0.08).min(6.0);
+                let thumb_rect = Rect::from_min_size(
+                    Pos2::new(base_x + anim_x - velocity_stretch * 0.5, target_rect.top()),
+                    Vec2::new(anim_w + velocity_stretch, target_rect.height()),
+                );
+                let cr = CornerRadius::same(13);
+
+                let shadow = Shadow {
+                    offset: [0, 2],
+                    blur: 8,
+                    spread: 0,
+                    color: palette.shadow_color,
+                };
+                let pad = thumb_rect.height() * 0.45;
+                let thumb_shapes = vec![
+                    Shape::Rect(shadow.as_shape(thumb_rect, cr)),
+                    Shape::rect_filled(thumb_rect, cr, palette.segment_thumb_fill),
+                    Shape::rect_stroke(
+                        thumb_rect,
+                        cr,
+                        Stroke::new(1.0_f32, palette.segment_thumb_border),
+                        StrokeKind::Inside,
+                    ),
+                    Shape::line_segment(
+                        [
+                            Pos2::new(thumb_rect.left() + pad, thumb_rect.top() + 1.0),
+                            Pos2::new(thumb_rect.right() - pad, thumb_rect.top() + 1.0),
+                        ],
+                        Stroke::new(1.0_f32, palette.specular_top),
+                    ),
+                ];
+                ui.painter().set(thumb_slot, Shape::Vec(thumb_shapes));
+            }
         },
     );
     changed
@@ -816,7 +1199,8 @@ pub fn glass_search_bar(
                 let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(16.0, 20.0), Sense::hover());
                 paint_search_icon(ui.painter(), icon_rect.center(), palette.text_muted);
 
-                let text_w = (ui.available_width() - if query.is_empty() { 4.0 } else { 24.0 }).max(80.0);
+                let text_w =
+                    (ui.available_width() - if query.is_empty() { 4.0 } else { 24.0 }).max(80.0);
                 let resp = ui.add(
                     egui::TextEdit::singleline(query)
                         .hint_text(hint)
@@ -841,10 +1225,14 @@ pub fn glass_search_bar(
                         ui.painter().circle_filled(c, 8.0, bg);
                         let s = 3.2;
                         let stroke = Stroke::new(1.3_f32, palette.text_secondary);
-                        ui.painter()
-                            .line_segment([Pos2::new(c.x - s, c.y - s), Pos2::new(c.x + s, c.y + s)], stroke);
-                        ui.painter()
-                            .line_segment([Pos2::new(c.x + s, c.y - s), Pos2::new(c.x - s, c.y + s)], stroke);
+                        ui.painter().line_segment(
+                            [Pos2::new(c.x - s, c.y - s), Pos2::new(c.x + s, c.y + s)],
+                            stroke,
+                        );
+                        ui.painter().line_segment(
+                            [Pos2::new(c.x + s, c.y - s), Pos2::new(c.x - s, c.y + s)],
+                            stroke,
+                        );
                     }
                     if x_resp.clicked() {
                         query.clear();
@@ -931,21 +1319,22 @@ pub fn paint_app_emblem(ui: &mut egui::Ui, palette: &Palette, size: f32) {
     let p = ui.painter();
     let cr = CornerRadius::same((size * 0.28) as u8);
 
-    // Subtle colored drop glow
     let glow = Shadow {
         offset: [0, 4],
         blur: 14,
         spread: 0,
-        color: rgba(palette.accent_blue.r(), palette.accent_blue.g(), palette.accent_blue.b(), 80),
+        color: rgba(
+            palette.accent_blue.r(),
+            palette.accent_blue.g(),
+            palette.accent_blue.b(),
+            80,
+        ),
     };
     p.add(glow.as_shape(rect, cr));
 
-    // Gradient base squircle
     p.rect_filled(rect, cr, rgba(22, 134, 255, 225));
-    // Lower-right mint caustic highlight inside squircle
     let inner_orb = Pos2::new(rect.right() - size * 0.25, rect.bottom() - size * 0.25);
     p.circle_filled(inner_orb, size * 0.36, rgba(48, 224, 152, 145));
-    // Specular glass border
     p.rect_stroke(
         rect,
         cr,
@@ -953,7 +1342,6 @@ pub fn paint_app_emblem(ui: &mut egui::Ui, palette: &Palette, size: f32) {
         StrokeKind::Inside,
     );
 
-    // Isometric cube wireframe motif (Minecraft + Bots)
     let c = rect.center();
     let r = size * 0.26;
     let top = Pos2::new(c.x, c.y - r);
@@ -980,7 +1368,11 @@ pub fn paint_avatar_badge(ui: &mut egui::Ui, label: &str, accent: Color32, size:
     let c = rect.center();
     let r = size * 0.5;
     p.circle_filled(c, r, rgba(accent.r(), accent.g(), accent.b(), 38));
-    p.circle_stroke(c, r - 0.5, Stroke::new(1.0_f32, rgba(accent.r(), accent.g(), accent.b(), 120)));
+    p.circle_stroke(
+        c,
+        r - 0.5,
+        Stroke::new(1.0_f32, rgba(accent.r(), accent.g(), accent.b(), 120)),
+    );
 
     let ch = label
         .chars()
@@ -996,12 +1388,52 @@ pub fn paint_avatar_badge(ui: &mut egui::Ui, label: &str, accent: Color32, size:
     );
 }
 
+/// Paints a fixed-size rounded frosted placeholder icon (guaranteed exact `size x size`).
+pub fn paint_icon_placeholder(ui: &mut egui::Ui, palette: &Palette, title: &str, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let cr = CornerRadius::same(14);
+    let p = ui.painter();
+    p.rect_filled(rect, cr, palette.well_fill);
+    p.rect_stroke(
+        rect,
+        cr,
+        Stroke::new(1.0_f32, palette.border_subtle),
+        StrokeKind::Inside,
+    );
+
+    let initial = title
+        .chars()
+        .next()
+        .unwrap_or('M')
+        .to_ascii_uppercase()
+        .to_string();
+    let galley = p.layout_no_wrap(
+        initial,
+        egui::FontId::proportional(size * 0.42),
+        palette.accent_blue,
+    );
+    p.galley(
+        Pos2::new(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        palette.accent_blue,
+    );
+}
+
 fn paint_search_icon(p: &egui::Painter, c: Pos2, color: Color32) {
     let lens_c = Pos2::new(c.x - 1.5, c.y - 1.5);
     let stroke = Stroke::new(1.4_f32, color);
     p.circle_stroke(lens_c, 4.5, stroke);
     p.line_segment(
-        [Pos2::new(lens_c.x + 3.2, lens_c.y + 3.2), Pos2::new(c.x + 5.5, c.y + 5.5)],
+        [
+            Pos2::new(lens_c.x + 3.2, lens_c.y + 3.2),
+            Pos2::new(c.x + 5.5, c.y + 5.5),
+        ],
         stroke,
     );
 }
@@ -1031,7 +1463,10 @@ fn paint_nav_icon(p: &egui::Painter, c: Pos2, icon: NavIcon, color: Color32) {
             let bot = Pos2::new(c.x, c.y + r);
             let bl = Pos2::new(c.x - r * 0.88, c.y + r * 0.42);
             let left = Pos2::new(c.x - r * 0.88, c.y - r * 0.42);
-            p.add(Shape::closed_line(vec![top, right, br, bot, bl, left], stroke));
+            p.add(Shape::closed_line(
+                vec![top, right, br, bot, bl, left],
+                stroke,
+            ));
             p.line_segment([left, c], stroke);
             p.line_segment([right, c], stroke);
             p.line_segment([c, bot], stroke);
@@ -1061,7 +1496,6 @@ fn paint_nav_icon(p: &egui::Painter, c: Pos2, icon: NavIcon, color: Color32) {
             );
         }
         NavIcon::Settings => {
-            // Three horizontal slider tracks with knobs (clean macOS Control Center motif)
             for (dy, kx) in [(-3.8_f32, -2.0_f32), (0.0, 2.2), (3.8, -1.0)] {
                 let y = c.y + dy;
                 p.line_segment([Pos2::new(c.x - 6.0, y), Pos2::new(c.x + 6.0, y)], stroke);

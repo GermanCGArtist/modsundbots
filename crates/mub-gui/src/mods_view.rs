@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use eframe::egui::{self, CornerRadius, Margin, RichText, Stroke};
+use eframe::egui::{self, CornerRadius, RichText};
 use mub_core::{
     AppPaths, ModLoader, ModrinthClient, ModrinthEnvironment, ModrinthHit, ModrinthProject,
     ModrinthSort, ModrinthVersion, Profile, ProfileKind, ProfileStore, list_installed_mods,
@@ -485,7 +485,7 @@ impl ModsViewState {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut self.install_all_bots, "Sync to all Bots");
+                theme::glass_toggle(ui, palette, &mut self.install_all_bots, "Sync to all Bots");
 
                 let prev = self.selected_profile_id.clone();
                 egui::ComboBox::from_id_salt("mod_target_profile")
@@ -518,6 +518,7 @@ impl ModsViewState {
             theme::segmented_control(
                 ui,
                 palette,
+                "mods_sub_tab",
                 &mut self.sub_tab,
                 &[
                     (ModsSubTab::Discover, "Discover"),
@@ -677,7 +678,9 @@ impl ModsViewState {
 
                     for (slug, label) in MODRINTH_CATEGORIES {
                         let mut active = self.selected_categories.contains(*slug);
-                        if ui.checkbox(&mut active, *label).changed() {
+                        let prev = active;
+                        theme::glass_toggle(ui, palette, &mut active, label);
+                        if active != prev {
                             if active {
                                 self.selected_categories.insert((*slug).to_string());
                             } else {
@@ -870,56 +873,62 @@ impl ModsViewState {
                                 // Right stats & action column
                                 ui.allocate_ui(egui::vec2(right_col_w, 0.0), |ui| {
                                     ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{} dl",
-                                                    format_count(hit.downloads)
-                                                ))
-                                                .size(12.0)
-                                                .strong()
-                                                .color(palette.text_primary),
-                                            );
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "• {} fav",
-                                                    format_count(hit.follows)
-                                                ))
-                                                .size(11.5)
-                                                .color(palette.text_muted),
-                                            );
-                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "• {} fav",
+                                                        format_count(hit.follows)
+                                                    ))
+                                                    .size(11.5)
+                                                    .color(palette.text_muted),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} dl",
+                                                        format_count(hit.downloads)
+                                                    ))
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(palette.text_primary),
+                                                );
+                                            },
+                                        );
                                         ui.add_space(8.0);
-                                        ui.horizontal(|ui| {
-                                            let btn_label = if is_installed {
-                                                "Reinstall"
-                                            } else {
-                                                "Install"
-                                            };
-                                            if theme::pill_button(
-                                                ui,
-                                                palette,
-                                                btn_label,
-                                                ButtonTone::Primary,
-                                            )
-                                            .clicked()
-                                            {
-                                                install_target = Some((
-                                                    hit.project_id.clone(),
-                                                    hit.title.clone(),
-                                                ));
-                                            }
-                                            if theme::pill_button(
-                                                ui,
-                                                palette,
-                                                "Details",
-                                                ButtonTone::Secondary,
-                                            )
-                                            .clicked()
-                                            {
-                                                detail_to_open = Some(hit.project_id.clone());
-                                            }
-                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let btn_label = if is_installed {
+                                                    "Reinstall"
+                                                } else {
+                                                    "Install"
+                                                };
+                                                if theme::pill_button(
+                                                    ui,
+                                                    palette,
+                                                    btn_label,
+                                                    ButtonTone::Primary,
+                                                )
+                                                .clicked()
+                                                {
+                                                    install_target = Some((
+                                                        hit.project_id.clone(),
+                                                        hit.title.clone(),
+                                                    ));
+                                                }
+                                                if theme::pill_button(
+                                                    ui,
+                                                    palette,
+                                                    "Details",
+                                                    ButtonTone::Secondary,
+                                                )
+                                                .clicked()
+                                                {
+                                                    detail_to_open = Some(hit.project_id.clone());
+                                                }
+                                            },
+                                        );
                                     });
                                 });
                             });
@@ -1077,6 +1086,7 @@ impl ModsViewState {
             theme::segmented_control(
                 ui,
                 palette,
+                "mods_detail_tab",
                 &mut self.detail_tab,
                 &[
                     (DetailTab::Overview, "Overview & Gallery"),
@@ -1124,9 +1134,10 @@ impl ModsViewState {
                                                     .corner_radius(CornerRadius::same(10)),
                                             );
                                         } else {
-                                            ui.set_min_size(egui::vec2(260.0, 150.0));
-                                            ui.centered_and_justified(|ui| {
-                                                ui.spinner();
+                                            ui.allocate_ui(egui::vec2(260.0, 150.0), |ui| {
+                                                ui.centered_and_justified(|ui| {
+                                                    ui.spinner();
+                                                });
                                             });
                                         }
                                         if let Some(t) = &item.title {
@@ -1260,23 +1271,7 @@ impl ModsViewState {
                     .corner_radius(CornerRadius::same(14)),
             );
         } else {
-            let initial = title.chars().next().unwrap_or('M').to_ascii_uppercase();
-            egui::Frame::new()
-                .fill(palette.well_fill)
-                .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-                .corner_radius(CornerRadius::same(14))
-                .inner_margin(Margin::ZERO)
-                .show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(size, size));
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            RichText::new(initial.to_string())
-                                .size(size * 0.42)
-                                .strong()
-                                .color(palette.accent_blue),
-                        );
-                    });
-                });
+            theme::paint_icon_placeholder(ui, palette, title, size);
         }
     }
 }
