@@ -1,0 +1,17 @@
+[package]
+name = "mub-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mub"
+path = "src/main.rs"
+
+[dependencies]
+mub-core = { path = "../mub-core" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
