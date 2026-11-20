@@ -9,6 +9,7 @@ pub mod modrinth;
 pub mod mojang;
 pub mod paths;
 pub mod profile;
+pub mod updater;
 
 pub use account::{Account, AccountRole, AccountStore, DeviceCodeResponse, MsaAuthClient};
 pub use catalog::{
@@ -43,6 +44,11 @@ pub use mojang::{LoaderVersionInfo, PreparedVersion, VersionManager};
 pub use paths::{AppPaths, open_in_file_manager};
 pub use profile::{
     LauncherSettings, ModLoader, Profile, ProfileKind, ProfileStore, SUPPORTED_THEME_PALETTES,
+};
+pub use updater::{
+    CURRENT_VERSION as APP_VERSION, InstalledUpdateResult, UpdateCheckResult, check_for_updates,
+    cleanup_old_update_files, download_and_install_update, is_newer_version,
+    spawn_updated_relaunch,
 };
 
 #[cfg(test)]

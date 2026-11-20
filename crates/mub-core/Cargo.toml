@@ -19,3 +19,5 @@ sha1.workspace = true
 hex.workspace = true
 futures-util.workspace = true
 zip.workspace = true
+flate2.workspace = true
+tar.workspace = true

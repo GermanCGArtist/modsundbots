@@ -56,6 +56,15 @@ enum Commands {
         #[command(subcommand)]
         action: JavaAction,
     },
+    /// Check for and install ModsUndBots updates from GitHub Releases
+    Update {
+        /// Only check if an update is available without installing
+        #[arg(long)]
+        check: bool,
+        /// Optional GitHub PAT (overrides settings / MUB_GITHUB_TOKEN for private repo)
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -261,6 +270,7 @@ enum ProfileAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+    mub_core::cleanup_old_update_files();
     let cli = Cli::parse();
     let paths = AppPaths::default_root()?;
     paths.ensure_dirs()?;
@@ -302,8 +312,47 @@ async fn main() -> Result<()> {
         Commands::Mods { action } => handle_mods(action, &paths, &settings).await?,
         Commands::Pack { action } => handle_pack(action, &paths, &settings).await?,
         Commands::Java { action } => handle_java(action),
+        Commands::Update { check, token } => handle_update(check, token, &settings).await?,
     }
 
+    Ok(())
+}
+
+async fn handle_update(check_only: bool, token: Option<String>, settings: &LauncherSettings) -> Result<()> {
+    let effective_token = token
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| settings.effective_github_update_token());
+    let token_ref = effective_token.as_deref();
+
+    println!("Current version: v{}", mub_core::APP_VERSION);
+    println!("Checking GitHub Releases...");
+    let info = mub_core::check_for_updates(token_ref).await?;
+    println!("Latest release:  {} ({})", info.tag_name, info.html_url);
+
+    if !info.update_available {
+        println!("ModsUndBots is already up to date.");
+        return Ok(());
+    }
+
+    if !info.release_notes.trim().is_empty() {
+        println!("\nRelease notes:\n{}", info.release_notes.trim());
+    }
+
+    if check_only {
+        println!("\nRun `mub update` to download and install {}.", info.tag_name);
+        return Ok(());
+    }
+
+    let asset = info
+        .asset_name
+        .as_deref()
+        .unwrap_or("(unknown asset for this OS/arch)");
+    println!("\nDownloading {asset}...");
+    let installed = mub_core::download_and_install_update(&info, token_ref).await?;
+    println!("Successfully updated to v{}!", installed.new_version);
+    for path in installed.updated_binaries {
+        println!("  Updated: {}", path.display());
+    }
     Ok(())
 }
 

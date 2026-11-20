@@ -236,6 +236,8 @@ pub struct LauncherSettings {
     pub theme_palette: String,
     #[serde(default)]
     pub curseforge_api_key: String,
+    #[serde(default)]
+    pub github_update_token: String,
 }
 
 impl Default for LauncherSettings {
@@ -247,6 +249,7 @@ impl Default for LauncherSettings {
             max_concurrent_downloads: 16,
             theme_palette: default_theme_palette(),
             curseforge_api_key: String::new(),
+            github_update_token: String::new(),
         }
     }
 }
@@ -277,6 +280,19 @@ impl LauncherSettings {
         }
         std::env::var("MUB_CURSEFORGE_API_KEY")
             .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    }
+
+    /// Returns the GitHub PAT for private-repo self-updates if non-empty, else from `MUB_GITHUB_TOKEN` / `GITHUB_TOKEN`.
+    pub fn effective_github_update_token(&self) -> Option<String> {
+        let trimmed = self.github_update_token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+        std::env::var("MUB_GITHUB_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
     }

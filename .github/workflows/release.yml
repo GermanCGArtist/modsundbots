@@ -7,16 +7,67 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to attach macOS binaries to"
+        description: "Release tag to build and attach binaries to"
         required: true
-        default: "v0.2.0"
+        default: "v0.3.0"
 
 permissions:
   contents: write
 
 jobs:
+  ensure-release:
+    name: Ensure GitHub Release Exists
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release create "$TAG_NAME" \
+              --title "ModsUndBots $TAG_NAME" \
+              --notes "ModsUndBots $TAG_NAME multi-platform release (Windows x64, macOS arm64 & x86_64, Linux x64)."
+          fi
+
+  build-windows:
+    name: Build Windows (x86_64)
+    needs: ensure-release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --target x86_64-pc-windows-msvc
+
+      - name: Package Windows archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/modsundbots.exe dist/
+          Copy-Item target/x86_64-pc-windows-msvc/release/mub.exe dist/
+          Compress-Archive -Path dist/modsundbots.exe, dist/mub.exe -DestinationPath modsundbots-windows-x86_64.zip -Force
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "$env:TAG_NAME" `
+            modsundbots-windows-x86_64.zip `
+            target/x86_64-pc-windows-msvc/release/modsundbots.exe `
+            target/x86_64-pc-windows-msvc/release/mub.exe `
+            --clobber
+
   build-macos:
     name: Build macOS (${{ matrix.target }})
+    needs: ensure-release
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -52,3 +103,48 @@ jobs:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
         run: |
           gh release upload "$TAG_NAME" "modsundbots-macos-${{ matrix.arch }}.tar.gz" --clobber
+
+  build-linux:
+    name: Build Linux (x86_64)
+    needs: ensure-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies for egui/eframe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libgl1-mesa-dev \
+            libfontconfig1-dev \
+            libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
+
+      - name: Package Linux archive
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-gnu/release/modsundbots dist/
+          cp target/x86_64-unknown-linux-gnu/release/mub dist/
+          chmod +x dist/modsundbots dist/mub
+          tar -czf modsundbots-linux-x86_64.tar.gz -C dist modsundbots mub
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "$TAG_NAME" modsundbots-linux-x86_64.tar.gz --clobber

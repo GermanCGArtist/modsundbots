@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod instance_view;
 mod markdown;
 mod mods_view;
@@ -16,11 +18,13 @@ use instance_view::{
 use mods_view::{ModsAction, ModsViewState};
 use mub_core::mojang::VersionEntry;
 use mub_core::{
-    Account, AccountRole, AccountStore, AppPaths, CatalogClient, ContentKind, CurseForgeClient,
-    DeviceCodeResponse, InstanceManager, InstanceState, InstanceStatus, JavaInstallation,
-    LauncherSettings, LoaderVersionInfo, ModLoader, ModpackImportResult, MsaAuthClient, Profile,
-    ProfileKind, ProfileStore, VersionManager, detect_java_installations, import_curseforge_pack,
-    import_mrpack, list_installed_content, open_in_file_manager,
+    APP_VERSION, Account, AccountRole, AccountStore, AppPaths, CatalogClient, ContentKind,
+    CurseForgeClient, DeviceCodeResponse, InstalledUpdateResult, InstanceManager, InstanceState,
+    InstanceStatus, JavaInstallation, LauncherSettings, LoaderVersionInfo, ModLoader,
+    ModpackImportResult, MsaAuthClient, Profile, ProfileKind, ProfileStore, UpdateCheckResult,
+    VersionManager, check_for_updates, cleanup_old_update_files, detect_java_installations,
+    download_and_install_update, import_curseforge_pack, import_mrpack, list_installed_content,
+    open_in_file_manager, spawn_updated_relaunch,
 };
 use theme::{ButtonTone, NavIcon, Palette, ThemePreset};
 use tokio::sync::mpsc;
@@ -546,6 +550,11 @@ enum BgEvent {
     PackImported(ModpackImportResult),
     ProfileUpdatesChecked(HashMap<String, usize>),
     CfKeyTested(Result<bool, String>),
+    AppUpdateChecked {
+        silent: bool,
+        res: Result<UpdateCheckResult, String>,
+    },
+    AppUpdateInstalled(Result<InstalledUpdateResult, String>),
     JavasDetected(Vec<JavaInstallation>),
     TaskProgress(Option<(f32, String)>),
     Toast(ToastTone, String),
@@ -627,6 +636,12 @@ struct MubApp {
     // Config state
     show_cf_key: bool,
     cf_key_status: CfKeyStatus,
+    show_gh_token: bool,
+    app_update_check: Option<UpdateCheckResult>,
+    app_update_error: Option<String>,
+    checking_app_update: bool,
+    installing_app_update: bool,
+    app_update_installed: Option<InstalledUpdateResult>,
     detected_javas: Vec<JavaInstallation>,
     detecting_javas: bool,
 
@@ -641,6 +656,7 @@ impl MubApp {
         );
         let paths = AppPaths::default_root().expect("Failed to resolve app data dir");
         let _ = paths.ensure_dirs();
+        cleanup_old_update_files();
         let settings = LauncherSettings::load(&paths.settings_file()).unwrap_or_default();
         let accounts = AccountStore::load(&paths.accounts_file()).unwrap_or_default();
         let profiles = ProfileStore::load(&paths.profiles_file()).unwrap_or_default();
@@ -683,6 +699,18 @@ impl MubApp {
         } else {
             CfKeyStatus::Unset
         };
+
+        // Silent startup update check (only notifies if a newer version is available)
+        let tx_upd = tx.clone();
+        let ctx_upd = cc.egui_ctx.clone();
+        let gh_tok = settings.effective_github_update_token();
+        rt.spawn(async move {
+            let res = check_for_updates(gh_tok.as_deref())
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx_upd.send(BgEvent::AppUpdateChecked { silent: true, res });
+            ctx_upd.request_repaint();
+        });
 
         Self {
             rt,
@@ -737,6 +765,12 @@ impl MubApp {
             console_search: String::new(),
             show_cf_key: false,
             cf_key_status,
+            show_gh_token: false,
+            app_update_check: None,
+            app_update_error: None,
+            checking_app_update: false,
+            installing_app_update: false,
+            app_update_installed: None,
             detected_javas: Vec::new(),
             detecting_javas: true,
             tx,
@@ -917,6 +951,59 @@ impl MubApp {
                         self.push_toast(ToastTone::Danger, format!("CurseForge test failed: {e}"));
                     }
                 },
+                BgEvent::AppUpdateChecked { silent, res } => {
+                    self.checking_app_update = false;
+                    match res {
+                        Ok(info) => {
+                            self.app_update_error = None;
+                            let avail = info.update_available;
+                            let tag = info.tag_name.clone();
+                            self.app_update_check = Some(info);
+                            if avail {
+                                self.push_toast(
+                                    ToastTone::Warn,
+                                    format!("Update available: {tag} — open 05 CONFIG to install."),
+                                );
+                            } else if !silent {
+                                self.push_toast(
+                                    ToastTone::Focus,
+                                    format!("ModsUndBots v{APP_VERSION} is up to date."),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            self.app_update_error = Some(e.clone());
+                            if !silent {
+                                self.push_toast(
+                                    ToastTone::Danger,
+                                    format!("Update check failed: {e}"),
+                                );
+                            }
+                        }
+                    }
+                }
+                BgEvent::AppUpdateInstalled(res) => {
+                    self.installing_app_update = false;
+                    self.task_progress = None;
+                    match res {
+                        Ok(installed) => {
+                            let ver = installed.new_version.clone();
+                            self.app_update_installed = Some(installed);
+                            self.app_update_error = None;
+                            self.push_toast(
+                                ToastTone::Focus,
+                                format!("Updated to v{ver}! Click RESTART NOW in 05 CONFIG."),
+                            );
+                        }
+                        Err(e) => {
+                            self.app_update_error = Some(e.clone());
+                            self.push_toast(
+                                ToastTone::Danger,
+                                format!("Update install failed: {e}"),
+                            );
+                        }
+                    }
+                }
                 BgEvent::JavasDetected(list) => {
                     self.detecting_javas = false;
                     self.detected_javas = list;
@@ -1659,7 +1746,17 @@ impl eframe::App for MubApp {
                     other => other,
                 };
 
-                let nav_items = [
+                    let config_badge = if self
+                        .app_update_check
+                        .as_ref()
+                        .is_some_and(|u| u.update_available)
+                        || self.app_update_installed.is_some()
+                    {
+                        Some("UPD")
+                    } else {
+                        None
+                    };
+                    let nav_items = [
                     (
                         ActiveView::Instances,
                         "01",
@@ -1697,8 +1794,12 @@ impl eframe::App for MubApp {
                         "05",
                         NavIcon::Config,
                         "CONFIG",
-                        None,
-                        palette.meta,
+                        config_badge,
+                        if config_badge.is_some() {
+                            palette.warn
+                        } else {
+                            palette.meta
+                        },
                     ),
                 ];
 
@@ -4070,6 +4171,196 @@ impl MubApp {
                         });
                     });
                 });
+            });
+
+            ui.add_space(12.0);
+            self.render_app_updates_card(ui, ctx, palette);
+        });
+    }
+
+    fn trigger_app_update_check(&mut self, ctx: &egui::Context, silent: bool) {
+        if self.checking_app_update || self.installing_app_update {
+            return;
+        }
+        self.checking_app_update = true;
+        self.app_update_error = None;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        let token = self.settings.effective_github_update_token();
+        self.rt.spawn(async move {
+            let res = check_for_updates(token.as_deref())
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(BgEvent::AppUpdateChecked { silent, res });
+            ctx.request_repaint();
+        });
+    }
+
+    fn trigger_app_update_install(&mut self, ctx: &egui::Context) {
+        let Some(check) = self.app_update_check.clone() else {
+            return;
+        };
+        if self.installing_app_update || !check.update_available {
+            return;
+        }
+        self.installing_app_update = true;
+        self.app_update_error = None;
+        self.task_progress = Some((0.35, format!("Downloading {}...", check.tag_name)));
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        let token = self.settings.effective_github_update_token();
+        self.rt.spawn(async move {
+            let res = download_and_install_update(&check, token.as_deref())
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(BgEvent::AppUpdateInstalled(res));
+            ctx.request_repaint();
+        });
+    }
+
+    fn render_app_updates_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        palette: &Palette,
+    ) {
+        theme::term_surface(ui, palette, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                theme::section_header(ui, palette, "APP UPDATES (GITHUB RELEASES)", palette.focus);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme::term_badge(
+                        ui,
+                        &format!("v{APP_VERSION}"),
+                        palette.ink,
+                        palette.surface,
+                    );
+                    if let Some(installed) = &self.app_update_installed {
+                        theme::term_badge(
+                            ui,
+                            &format!("INSTALLED v{}", installed.new_version),
+                            palette.focus,
+                            palette.focus_bg,
+                        );
+                    } else if let Some(check) = &self.app_update_check {
+                        if check.update_available {
+                            theme::term_badge(
+                                ui,
+                                &format!("AVAILABLE {}", check.tag_name),
+                                palette.warn,
+                                palette.warn_bg,
+                            );
+                        } else {
+                            theme::term_badge(ui, "UP TO DATE", palette.focus, palette.focus_bg);
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                let busy = self.checking_app_update || self.installing_app_update;
+                let check_lbl = if self.checking_app_update {
+                    "[↻] CHECKING..."
+                } else {
+                    "[↻] CHECK FOR UPDATES"
+                };
+                if ui
+                    .add_enabled_ui(!busy, |ui| {
+                        theme::term_button(ui, palette, check_lbl, ButtonTone::Secondary)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    self.trigger_app_update_check(ctx, false);
+                }
+
+                if let Some(check) = &self.app_update_check
+                    && check.update_available
+                    && self.app_update_installed.is_none()
+                {
+                    let install_lbl = if self.installing_app_update {
+                        "INSTALLING..."
+                    } else {
+                        "DOWNLOAD & INSTALL"
+                    };
+                    if ui
+                        .add_enabled_ui(!busy && check.asset_name.is_some(), |ui| {
+                            theme::term_button(ui, palette, install_lbl, ButtonTone::Cta)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        self.trigger_app_update_install(ctx);
+                    }
+                }
+
+                if self.app_update_installed.is_some()
+                    && theme::term_button(ui, palette, "RESTART NOW", ButtonTone::Focus).clicked()
+                {
+                    match spawn_updated_relaunch() {
+                        Ok(()) => std::process::exit(0),
+                        Err(e) => {
+                            self.push_toast(ToastTone::Danger, format!("Relaunch failed: {e}"));
+                        }
+                    }
+                }
+            });
+
+            if let Some(err) = &self.app_update_error {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(err)
+                        .monospace()
+                        .size(11.0)
+                        .color(palette.danger),
+                );
+            } else if let Some(check) = &self.app_update_check {
+                ui.add_space(6.0);
+                let asset_info = check
+                    .asset_name
+                    .as_deref()
+                    .unwrap_or("no matching binary for this OS/arch");
+                ui.label(
+                    RichText::new(format!(
+                        "Latest: {}  ·  Asset: {asset_info}",
+                        check.tag_name
+                    ))
+                    .monospace()
+                    .size(11.0)
+                    .color(palette.ink_muted),
+                );
+                if !check.release_notes.trim().is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(check.release_notes.trim())
+                            .monospace()
+                            .size(11.0)
+                            .color(palette.ink_dim),
+                    );
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("GITHUB TOKEN (OPTIONAL — REQUIRED FOR PRIVATE REPO, OR ENV MUB_GITHUB_TOKEN)")
+                    .monospace()
+                    .size(11.0)
+                    .color(palette.ink_muted),
+            );
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings.github_update_token)
+                        .password(!self.show_gh_token)
+                        .hint_text("ghp_... or github_pat_... (Contents: Read)")
+                        .font(egui::FontId::monospace(12.0))
+                        .desired_width((ui.available_width() - 80.0).max(120.0)),
+                );
+                let eye_lbl = if self.show_gh_token { "HIDE" } else { "SHOW" };
+                if theme::term_button(ui, palette, eye_lbl, ButtonTone::Secondary).clicked() {
+                    self.show_gh_token = !self.show_gh_token;
+                }
             });
         });
     }
