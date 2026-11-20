@@ -22,10 +22,12 @@ jobs:
       - name: Create release if missing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
         run: |
-          if ! gh release view "$TAG_NAME" >/dev/null 2>&1; then
+          if ! gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release create "$TAG_NAME" \
+              --repo "$GH_REPO" \
               --title "ModsUndBots $TAG_NAME" \
               --notes "ModsUndBots $TAG_NAME multi-platform release (Windows x64, macOS arm64 & x86_64, Linux x64)."
           fi
