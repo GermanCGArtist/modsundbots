@@ -78,6 +78,8 @@ pub struct Library {
     #[serde(default)]
     pub rules: Vec<Rule>,
     pub url: Option<String>,
+    #[serde(default)]
+    pub natives: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -91,11 +93,15 @@ pub struct LibraryDownloads {
 pub struct Rule {
     pub action: String,
     pub os: Option<OsRule>,
+    #[serde(default)]
+    pub features: Option<HashMap<String, bool>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OsRule {
     pub name: Option<String>,
+    pub arch: Option<String>,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -117,6 +123,12 @@ pub struct AssetObject {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoaderVersionInfo {
+    pub version: String,
+    pub stable: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FabricLoaderEntry {
     pub loader: FabricLoaderInfo,
@@ -125,7 +137,12 @@ pub struct FabricLoaderEntry {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FabricLoaderInfo {
     pub version: String,
+    #[serde(default = "default_true")]
     pub stable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,12 +150,26 @@ pub struct FabricLoaderInfo {
 pub struct FabricProfileJson {
     pub main_class: String,
     pub libraries: Vec<FabricLibrary>,
+    #[serde(default)]
+    pub arguments: Option<VersionArguments>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FabricLibrary {
     pub name: String,
-    pub url: String,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeoForgeVersionJson {
+    pub id: String,
+    pub main_class: String,
+    #[serde(default)]
+    pub libraries: Vec<Library>,
+    #[serde(default)]
+    pub arguments: Option<VersionArguments>,
 }
 
 /// Prepared launch classpath and metadata for a Minecraft version.
@@ -148,8 +179,11 @@ pub struct PreparedVersion {
     pub main_class: String,
     pub asset_index_id: String,
     pub classpath: Vec<PathBuf>,
+    pub extra_jvm_args: Vec<String>,
+    pub extra_game_args: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct VersionManager {
     http: Client,
 }
@@ -162,9 +196,12 @@ impl Default for VersionManager {
 
 impl VersionManager {
     pub fn new() -> Self {
-        Self {
-            http: Client::new(),
-        }
+        let http = Client::builder()
+            .user_agent("ModsUndBots/0.2.0 (https://github.com/modsundbots)")
+            .pool_max_idle_per_host(16)
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        Self { http }
     }
 
     pub async fn fetch_manifest(&self) -> Result<VersionManifest> {
@@ -188,6 +225,66 @@ impl VersionManager {
             )));
         }
         Ok(resp.json().await?)
+    }
+
+    pub async fn fetch_fabric_loader_versions(
+        &self,
+        mc_version: &str,
+    ) -> Result<Vec<LoaderVersionInfo>> {
+        let entries = self.fetch_fabric_loaders(mc_version).await?;
+        Ok(entries
+            .into_iter()
+            .map(|e| LoaderVersionInfo {
+                version: e.loader.version,
+                stable: e.loader.stable,
+            })
+            .collect())
+    }
+
+    pub async fn fetch_quilt_loaders(&self, mc_version: &str) -> Result<Vec<LoaderVersionInfo>> {
+        let url = format!("https://meta.quiltmc.org/v3/versions/loader/{mc_version}");
+        let resp = self.http.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(MubError::Download(format!(
+                "Failed to fetch Quilt loaders for {mc_version}: {}",
+                resp.status()
+            )));
+        }
+        let entries: Vec<FabricLoaderEntry> = resp.json().await?;
+        Ok(entries
+            .into_iter()
+            .map(|e| {
+                let ver = e.loader.version;
+                let stable = e.loader.stable
+                    && !ver.contains("beta")
+                    && !ver.contains("alpha")
+                    && !ver.contains("pre");
+                LoaderVersionInfo {
+                    version: ver,
+                    stable,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn fetch_neoforge_versions(
+        &self,
+        mc_version: &str,
+    ) -> Result<Vec<LoaderVersionInfo>> {
+        let prefix = neoforge_mc_prefix(mc_version);
+        let url =
+            "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
+        let resp = self.http.get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(MubError::Download(format!(
+                "Failed to fetch NeoForge metadata: {}",
+                resp.status()
+            )));
+        }
+        let xml = resp.text().await?;
+        let mut versions = parse_maven_metadata_versions(&xml, &prefix);
+        versions.sort_by(|a, b| compare_neoforge_versions(&b.version, &a.version));
+        Ok(versions)
     }
 
     /// Ensure all shared assets, libraries, and client jar for `mc_version` are downloaded.
@@ -238,10 +335,12 @@ impl VersionManager {
         let mut classpath = Vec::new();
         let mut download_tasks: Vec<(String, PathBuf, Option<String>)> = Vec::new();
         let mut native_jars: Vec<PathBuf> = Vec::new();
-        let native_key = current_native_key();
 
         for lib in &meta.libraries {
             if !rules_allow(&lib.rules) {
+                continue;
+            }
+            if is_wrong_arch_native_coord(&lib.name) {
                 continue;
             }
             if let Some(downloads) = &lib.downloads {
@@ -252,16 +351,12 @@ impl VersionManager {
                         .unwrap_or_else(|| maven_to_path(&lib.name));
                     let dest = paths.libraries_dir().join(&rel);
                     classpath.push(dest.clone());
-                    if let Some(nk) = native_key
-                        && lib.name.contains(nk)
-                    {
+                    if is_current_arch_native_coord(&lib.name) {
                         native_jars.push(dest.clone());
                     }
                     download_tasks.push((artifact.url.clone(), dest, artifact.sha1.clone()));
                 }
-                if let Some(nk) = native_key
-                    && let Some(native_art) = downloads.classifiers.get(nk)
-                {
+                if let Some(native_art) = select_native_classifier(lib, &downloads.classifiers) {
                     let rel = native_art
                         .path
                         .clone()
@@ -317,6 +412,8 @@ impl VersionManager {
             main_class: meta.main_class,
             asset_index_id: meta.asset_index.id,
             classpath,
+            extra_jvm_args: Vec::new(),
+            extra_game_args: Vec::new(),
         })
     }
 
@@ -347,31 +444,282 @@ impl VersionManager {
         let url = format!(
             "https://meta.fabricmc.net/v2/versions/loader/{mc_version}/{loader_version}/profile/json"
         );
-        let resp = self.http.get(&url).send().await?;
+        self.apply_loader_profile_json(
+            paths,
+            &url,
+            "https://maven.fabricmc.net",
+            &mut prepared,
+            natives_dir,
+            max_concurrent,
+            &on_progress,
+        )
+        .await?;
+        Ok(prepared)
+    }
+
+    /// Overlay Quilt loader libraries and main class on top of a prepared Vanilla version.
+    pub async fn prepare_quilt<F>(
+        &self,
+        paths: &AppPaths,
+        mc_version: &str,
+        loader_version: &str,
+        natives_dir: &Path,
+        max_concurrent: usize,
+        on_progress: F,
+    ) -> Result<PreparedVersion>
+    where
+        F: Fn(String) + Send + Sync + Clone + 'static,
+    {
+        let mut prepared = self
+            .prepare_vanilla(
+                paths,
+                mc_version,
+                natives_dir,
+                max_concurrent,
+                on_progress.clone(),
+            )
+            .await?;
+
+        on_progress(format!("Fetching Quilt {loader_version} profile..."));
+        let url = format!(
+            "https://meta.quiltmc.org/v3/versions/loader/{mc_version}/{loader_version}/profile/json"
+        );
+        self.apply_loader_profile_json(
+            paths,
+            &url,
+            "https://maven.quiltmc.org/repository/release",
+            &mut prepared,
+            natives_dir,
+            max_concurrent,
+            &on_progress,
+        )
+        .await?;
+        Ok(prepared)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_loader_profile_json<F>(
+        &self,
+        paths: &AppPaths,
+        url: &str,
+        default_maven_base: &str,
+        prepared: &mut PreparedVersion,
+        natives_dir: &Path,
+        max_concurrent: usize,
+        on_progress: &F,
+    ) -> Result<()>
+    where
+        F: Fn(String) + Send + Sync,
+    {
+        let resp = self.http.get(url).send().await?;
         if !resp.status().is_success() {
             return Err(MubError::Download(format!(
-                "Failed to fetch Fabric profile for {mc_version}/{loader_version}: {}",
+                "Failed to fetch loader profile {url}: {}",
                 resp.status()
             )));
         }
-        let fabric: FabricProfileJson = resp.json().await?;
+        let profile: FabricProfileJson = resp.json().await?;
 
         let mut tasks = Vec::new();
-        let mut fabric_cp = Vec::new();
-        for lib in fabric.libraries {
+        let mut loader_cp = Vec::new();
+        for lib in profile.libraries {
             let rel = maven_to_path(&lib.name);
             let dest = paths.libraries_dir().join(&rel);
-            let base = lib.url.trim_end_matches('/');
+            let base = lib
+                .url
+                .as_deref()
+                .filter(|u| !u.trim().is_empty())
+                .unwrap_or(default_maven_base)
+                .trim_end_matches('/');
             let dl_url = format!("{base}/{rel}");
-            fabric_cp.push(dest.clone());
+            loader_cp.push(dest.clone());
             tasks.push((dl_url, dest, None));
         }
 
-        self.run_download_batch(tasks, max_concurrent, &on_progress)
+        self.run_download_batch(tasks, max_concurrent, on_progress)
             .await?;
-        fabric_cp.extend(prepared.classpath);
-        prepared.classpath = fabric_cp;
-        prepared.main_class = fabric.main_class;
+        loader_cp.extend(std::mem::take(&mut prepared.classpath));
+        prepared.classpath = dedup_paths(loader_cp);
+        prepared.main_class = profile.main_class;
+
+        if let Some(args) = profile.arguments {
+            let version_id = prepared.version_id.clone();
+            prepared.extra_jvm_args.extend(collect_allowed_args(
+                &args.jvm,
+                paths,
+                &version_id,
+                natives_dir,
+            ));
+            prepared.extra_game_args.extend(collect_allowed_args(
+                &args.game,
+                paths,
+                &version_id,
+                natives_dir,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Install (if needed) and overlay NeoForge on top of a prepared Vanilla version.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_neoforge<F>(
+        &self,
+        paths: &AppPaths,
+        mc_version: &str,
+        loader_version: &str,
+        natives_dir: &Path,
+        max_concurrent: usize,
+        java_bin: &str,
+        on_progress: F,
+    ) -> Result<PreparedVersion>
+    where
+        F: Fn(String) + Send + Sync + Clone + 'static,
+    {
+        let mut prepared = self
+            .prepare_vanilla(
+                paths,
+                mc_version,
+                natives_dir,
+                max_concurrent,
+                on_progress.clone(),
+            )
+            .await?;
+
+        let nf_version_id = format!("neoforge-{loader_version}");
+        let nf_dir = paths.versions_dir().join(&nf_version_id);
+        let nf_json_path = nf_dir.join(format!("{nf_version_id}.json"));
+
+        if !nf_json_path.exists() {
+            // Ensure minimal launcher_profiles.json exists for NeoForge installer
+            let launcher_profiles = paths.shared_dir().join("launcher_profiles.json");
+            if !launcher_profiles.exists() {
+                std::fs::write(
+                    &launcher_profiles,
+                    r#"{"profiles":{},"selectedProfile":"","clientToken":"00000000-0000-0000-0000-000000000000"}"#,
+                )?;
+            }
+
+            let cache_dir = paths.shared_dir().join("cache");
+            std::fs::create_dir_all(&cache_dir)?;
+            let installer_jar =
+                cache_dir.join(format!("neoforge-{loader_version}-installer.jar"));
+            let installer_url = format!(
+                "https://maven.neoforged.net/releases/net/neoforged/neoforge/{loader_version}/neoforge-{loader_version}-installer.jar"
+            );
+
+            on_progress(format!("Downloading NeoForge {loader_version} installer..."));
+            self.download_if_missing(&installer_url, &installer_jar, None)
+                .await?;
+
+            let resolved_java = if java_bin.trim().is_empty() || java_bin.trim() == "java" {
+                let mc = mc_version.to_string();
+                let jb = java_bin.to_string();
+                tokio::task::spawn_blocking(move || {
+                    crate::java::resolve_java_for_mc(None, &jb, &mc)
+                })
+                .await
+                .unwrap_or_else(|_| java_bin.to_string())
+            } else {
+                java_bin.to_string()
+            };
+
+            on_progress(format!(
+                "Running NeoForge {loader_version} installer (this may take a minute)..."
+            ));
+            let mut cmd = tokio::process::Command::new(&resolved_java);
+            cmd.arg("-jar")
+                .arg(&installer_jar)
+                .arg("--installClient")
+                .arg(paths.shared_dir());
+            #[cfg(windows)]
+            {
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let output = cmd.output().await.map_err(|e| {
+                MubError::Launch(format!(
+                    "Failed to run NeoForge installer with '{resolved_java}': {e}"
+                ))
+            })?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return Err(MubError::Launch(format!(
+                    "NeoForge installer exited with {}: {}\n{}",
+                    output.status,
+                    stderr.trim(),
+                    stdout.trim()
+                )));
+            }
+            if !nf_json_path.exists() {
+                return Err(MubError::Launch(format!(
+                    "NeoForge installer finished but {} was not created",
+                    nf_json_path.display()
+                )));
+            }
+        }
+
+        on_progress(format!("Loading NeoForge {loader_version} metadata..."));
+        let nf_meta: NeoForgeVersionJson =
+            serde_json::from_str(&std::fs::read_to_string(&nf_json_path)?)?;
+
+        let mut nf_cp = Vec::new();
+        let mut download_tasks = Vec::new();
+        for lib in &nf_meta.libraries {
+            if !rules_allow(&lib.rules) || is_wrong_arch_native_coord(&lib.name) {
+                continue;
+            }
+            if let Some(downloads) = &lib.downloads
+                && let Some(artifact) = &downloads.artifact
+            {
+                let rel = artifact
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| maven_to_path(&lib.name));
+                let dest = paths.libraries_dir().join(&rel);
+                nf_cp.push(dest.clone());
+                if !artifact.url.is_empty() {
+                    download_tasks.push((artifact.url.clone(), dest, artifact.sha1.clone()));
+                }
+            } else {
+                let rel = maven_to_path(&lib.name);
+                let dest = paths.libraries_dir().join(&rel);
+                nf_cp.push(dest.clone());
+                if let Some(base) = &lib.url
+                    && !base.trim().is_empty()
+                {
+                    let url = format!("{}/{rel}", base.trim_end_matches('/'));
+                    download_tasks.push((url, dest, None));
+                }
+            }
+        }
+
+        if !download_tasks.is_empty() {
+            self.run_download_batch(download_tasks, max_concurrent, &on_progress)
+                .await?;
+        }
+
+        nf_cp.extend(std::mem::take(&mut prepared.classpath));
+        prepared.classpath = dedup_paths(nf_cp);
+        prepared.main_class = nf_meta.main_class;
+        prepared.version_id = nf_meta.id.clone();
+
+        if let Some(args) = nf_meta.arguments {
+            prepared.extra_jvm_args.extend(collect_allowed_args(
+                &args.jvm,
+                paths,
+                &nf_meta.id,
+                natives_dir,
+            ));
+            prepared.extra_game_args.extend(collect_allowed_args(
+                &args.game,
+                paths,
+                &nf_meta.id,
+                natives_dir,
+            ));
+        }
+
         Ok(prepared)
     }
 
@@ -465,22 +813,48 @@ fn verify_sha1(path: &Path, expected: &str) -> Result<bool> {
     Ok(actual.eq_ignore_ascii_case(expected))
 }
 
-fn rules_allow(rules: &[Rule]) -> bool {
-    if rules.is_empty() {
-        return true;
-    }
-    let current_os = if cfg!(target_os = "windows") {
+fn current_os_name() -> &'static str {
+    if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "macos") {
         "osx"
     } else {
         "linux"
-    };
+    }
+}
+
+fn arch_matches(arch: &str) -> bool {
+    let lower = arch.trim().to_ascii_lowercase();
+    if cfg!(target_arch = "x86_64") {
+        matches!(lower.as_str(), "x86_64" | "amd64" | "x64")
+    } else if cfg!(target_arch = "x86") {
+        matches!(lower.as_str(), "x86" | "i386" | "i686")
+    } else if cfg!(target_arch = "aarch64") {
+        matches!(lower.as_str(), "arm64" | "aarch64")
+    } else {
+        false
+    }
+}
+
+fn rules_allow(rules: &[Rule]) -> bool {
+    if rules.is_empty() {
+        return true;
+    }
+    let current_os = current_os_name();
 
     let mut allowed = false;
     for rule in rules {
+        if let Some(features) = &rule.features
+            && !features.is_empty()
+        {
+            continue;
+        }
         let os_matches = match &rule.os {
-            Some(os) => os.name.as_deref() == Some(current_os),
+            Some(os) => {
+                let name_ok = os.name.as_deref().is_none_or(|n| n == current_os);
+                let arch_ok = os.arch.as_deref().is_none_or(arch_matches);
+                name_ok && arch_ok
+            }
             None => true,
         };
         if os_matches {
@@ -490,31 +864,253 @@ fn rules_allow(rules: &[Rule]) -> bool {
     allowed
 }
 
-fn current_native_key() -> Option<&'static str> {
-    if cfg!(target_os = "windows") {
-        Some("natives-windows")
-    } else if cfg!(target_os = "macos") {
-        Some("natives-osx")
-    } else if cfg!(target_os = "linux") {
-        Some("natives-linux")
+fn extract_coord_classifier(coord: &str) -> Option<&str> {
+    let core = coord.split('@').next().unwrap_or(coord);
+    let mut parts = core.split(':');
+    let _g = parts.next()?;
+    let _a = parts.next()?;
+    let _v = parts.next()?;
+    parts.next()
+}
+
+fn native_classifier_os_and_arch(classifier: &str) -> Option<(&'static str, Option<&'static str>)> {
+    let lower = classifier.to_ascii_lowercase();
+    let (os, rest) = if let Some(r) = lower.strip_prefix("natives-windows") {
+        ("windows", r)
+    } else if let Some(r) = lower.strip_prefix("natives-macos") {
+        ("osx", r)
+    } else if let Some(r) = lower.strip_prefix("natives-osx") {
+        ("osx", r)
     } else {
+        let r = lower.strip_prefix("natives-linux")?;
+        ("linux", r)
+    };
+
+    let arch = if rest.is_empty() {
         None
+    } else if matches!(rest, "-x86_64" | "-amd64" | "-x64" | "-64") {
+        Some("x86_64")
+    } else if matches!(rest, "-x86" | "-i386" | "-i686" | "-32") {
+        Some("x86")
+    } else if matches!(rest, "-arm64" | "-aarch64") {
+        Some("aarch64")
+    } else {
+        Some("other")
+    };
+    Some((os, arch))
+}
+
+fn native_classifier_matches_current(classifier: &str) -> bool {
+    let Some((os, arch)) = native_classifier_os_and_arch(classifier) else {
+        return false;
+    };
+    if os != current_os_name() {
+        return false;
+    }
+    match arch {
+        Some("x86_64") => cfg!(target_arch = "x86_64"),
+        Some("x86") => cfg!(target_arch = "x86"),
+        Some("aarch64") => cfg!(target_arch = "aarch64"),
+        Some(_) => false,
+        None => !cfg!(target_arch = "aarch64") || os == "osx",
     }
 }
 
+fn is_wrong_arch_native_coord(coord: &str) -> bool {
+    let Some(classifier) = extract_coord_classifier(coord) else {
+        return false;
+    };
+    if native_classifier_os_and_arch(classifier).is_none() {
+        return false;
+    }
+    !native_classifier_matches_current(classifier)
+}
+
+fn is_current_arch_native_coord(coord: &str) -> bool {
+    extract_coord_classifier(coord).is_some_and(native_classifier_matches_current)
+}
+
+fn select_native_classifier<'a>(
+    lib: &Library,
+    classifiers: &'a HashMap<String, DownloadArtifact>,
+) -> Option<&'a DownloadArtifact> {
+    if classifiers.is_empty() {
+        return None;
+    }
+    let arch_bits = if cfg!(target_pointer_width = "64") {
+        "64"
+    } else {
+        "32"
+    };
+
+    if let Some(natives_map) = &lib.natives
+        && let Some(tmpl) = natives_map.get(current_os_name())
+    {
+        let resolved = tmpl.replace("${arch}", arch_bits);
+        if let Some(art) = classifiers.get(&resolved) {
+            return Some(art);
+        }
+    }
+
+    let candidates: &[&str] = if cfg!(target_os = "windows") {
+        if cfg!(target_arch = "aarch64") {
+            &["natives-windows-arm64", "natives-windows-aarch64"]
+        } else if cfg!(target_arch = "x86") {
+            &["natives-windows-x86", "natives-windows-32", "natives-windows"]
+        } else {
+            &["natives-windows-x86_64", "natives-windows-64", "natives-windows"]
+        }
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            &[
+                "natives-macos-arm64",
+                "natives-osx-arm64",
+                "natives-macos",
+                "natives-osx",
+            ]
+        } else {
+            &[
+                "natives-macos-x86_64",
+                "natives-osx-x86_64",
+                "natives-macos",
+                "natives-osx",
+            ]
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        &["natives-linux-arm64", "natives-linux-aarch64"]
+    } else if cfg!(target_arch = "x86") {
+        &["natives-linux-x86", "natives-linux-32", "natives-linux"]
+    } else {
+        &["natives-linux-x86_64", "natives-linux-64", "natives-linux"]
+    };
+
+    for key in candidates {
+        if let Some(art) = classifiers.get(*key) {
+            return Some(art);
+        }
+    }
+    None
+}
+
+fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        if seen.insert(p.clone()) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+fn collect_allowed_args(
+    items: &[serde_json::Value],
+    paths: &AppPaths,
+    version_name: &str,
+    natives_dir: &Path,
+) -> Vec<String> {
+    let lib_dir = paths.libraries_dir().to_string_lossy().into_owned();
+    let cp_sep = if cfg!(windows) { ";" } else { ":" };
+    let natives_str = natives_dir.to_string_lossy().into_owned();
+    let replace_vars = |s: &str| -> String {
+        s.replace("${library_directory}", &lib_dir)
+            .replace("${classpath_separator}", cp_sep)
+            .replace("${version_name}", version_name)
+            .replace("${natives_directory}", &natives_str)
+    };
+
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            serde_json::Value::String(s) => out.push(replace_vars(s)),
+            serde_json::Value::Object(map) => {
+                let rules_ok = map
+                    .get("rules")
+                    .and_then(|v| serde_json::from_value::<Vec<Rule>>(v.clone()).ok())
+                    .is_none_or(|r| rules_allow(&r));
+                if !rules_ok {
+                    continue;
+                }
+                match map.get("value") {
+                    Some(serde_json::Value::String(s)) => out.push(replace_vars(s)),
+                    Some(serde_json::Value::Array(arr)) => {
+                        for v in arr {
+                            if let Some(s) = v.as_str() {
+                                out.push(replace_vars(s));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn neoforge_mc_prefix(mc_version: &str) -> String {
+    let core = mc_version.trim().split(['-', '+']).next().unwrap_or(mc_version);
+    let mut parts = core.split('.');
+    let _major = parts.next().unwrap_or("1");
+    let minor = parts.next().unwrap_or("0");
+    let patch = parts.next().unwrap_or("0");
+    format!("{minor}.{patch}.")
+}
+
+fn parse_maven_metadata_versions(xml: &str, prefix: &str) -> Vec<LoaderVersionInfo> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<version>") {
+        let after = &rest[start + "<version>".len()..];
+        let Some(end) = after.find("</version>") else {
+            break;
+        };
+        let ver = after[..end].trim();
+        if ver.starts_with(prefix) {
+            let stable = !ver.contains("beta") && !ver.contains("alpha");
+            out.push(LoaderVersionInfo {
+                version: ver.to_string(),
+                stable,
+            });
+        }
+        rest = &after[end + "</version>".len()..];
+    }
+    out
+}
+
+fn compare_neoforge_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| -> (Vec<u64>, bool) {
+        let is_beta = s.contains("beta") || s.contains("alpha");
+        let core = s.split('-').next().unwrap_or(s);
+        let nums = core
+            .split('.')
+            .filter_map(|p| p.parse::<u64>().ok())
+            .collect();
+        (nums, !is_beta)
+    };
+    let (na, sa) = parse(a);
+    let (nb, sb) = parse(b);
+    na.cmp(&nb).then_with(|| sa.cmp(&sb)).then_with(|| a.cmp(b))
+}
+
 fn maven_to_path(coord: &str) -> String {
-    let parts: Vec<&str> = coord.split(':').collect();
+    let (base_coord, ext) = match coord.split_once('@') {
+        Some((c, e)) if !e.is_empty() => (c, e),
+        _ => (coord, "jar"),
+    };
+    let parts: Vec<&str> = base_coord.split(':').collect();
     if parts.len() < 3 {
         return coord.to_string();
     }
     let group = parts[0].replace('.', "/");
     let artifact = parts[1];
     let version = parts[2];
-    if parts.len() >= 4 {
+    if parts.len() >= 4 && !parts[3].is_empty() {
         let classifier = parts[3];
-        format!("{group}/{artifact}/{version}/{artifact}-{version}-{classifier}.jar")
+        format!("{group}/{artifact}/{version}/{artifact}-{version}-{classifier}.{ext}")
     } else {
-        format!("{group}/{artifact}/{version}/{artifact}-{version}.jar")
+        format!("{group}/{artifact}/{version}/{artifact}-{version}.{ext}")
     }
 }
 

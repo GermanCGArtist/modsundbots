@@ -1,0 +1,54 @@
+name: Release Builds
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach macOS binaries to"
+        required: true
+        default: "v0.2.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain & target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Package macOS archive
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/modsundbots dist/
+          cp target/${{ matrix.target }}/release/mub dist/
+          chmod +x dist/modsundbots dist/mub
+          tar -czf modsundbots-macos-${{ matrix.arch }}.tar.gz -C dist modsundbots mub
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "$TAG_NAME" "modsundbots-macos-${{ matrix.arch }}.tar.gz" --clobber

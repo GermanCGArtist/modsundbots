@@ -12,6 +12,40 @@ pub enum ModLoader {
     Vanilla,
     Fabric { loader_version: String },
     NeoForge { loader_version: String },
+    Quilt { loader_version: String },
+    Forge { loader_version: String },
+}
+
+impl ModLoader {
+    pub fn slug(&self) -> Option<&'static str> {
+        match self {
+            ModLoader::Vanilla => None,
+            ModLoader::Fabric { .. } => Some("fabric"),
+            ModLoader::NeoForge { .. } => Some("neoforge"),
+            ModLoader::Quilt { .. } => Some("quilt"),
+            ModLoader::Forge { .. } => Some("forge"),
+        }
+    }
+
+    pub fn curseforge_loader_id(&self) -> Option<u32> {
+        match self {
+            ModLoader::Vanilla => None,
+            ModLoader::Forge { .. } => Some(1),
+            ModLoader::Fabric { .. } => Some(4),
+            ModLoader::Quilt { .. } => Some(5),
+            ModLoader::NeoForge { .. } => Some(6),
+        }
+    }
+
+    pub fn loader_version(&self) -> Option<&str> {
+        match self {
+            ModLoader::Vanilla => None,
+            ModLoader::Fabric { loader_version }
+            | ModLoader::NeoForge { loader_version }
+            | ModLoader::Quilt { loader_version }
+            | ModLoader::Forge { loader_version } => Some(loader_version.as_str()),
+        }
+    }
 }
 
 impl std::fmt::Display for ModLoader {
@@ -20,6 +54,8 @@ impl std::fmt::Display for ModLoader {
             ModLoader::Vanilla => write!(f, "Vanilla"),
             ModLoader::Fabric { loader_version } => write!(f, "Fabric {loader_version}"),
             ModLoader::NeoForge { loader_version } => write!(f, "NeoForge {loader_version}"),
+            ModLoader::Quilt { loader_version } => write!(f, "Quilt {loader_version}"),
+            ModLoader::Forge { loader_version } => write!(f, "Forge {loader_version}"),
         }
     }
 }
@@ -64,6 +100,12 @@ pub struct Profile {
     pub resolution: Option<(u32, u32)>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub playtime_secs: u64,
+    #[serde(default)]
+    pub source_pack: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_launched_at: Option<DateTime<Utc>>,
 }
@@ -96,9 +138,23 @@ impl Profile {
                 ProfileKind::Bot => Some((640, 360)),
             },
             tags: Vec::new(),
+            group: None,
+            playtime_secs: 0,
+            source_pack: None,
             created_at: Utc::now(),
             last_launched_at: None,
         }
+    }
+
+    /// Clone this profile's configuration under a new ID and name.
+    pub fn clone_with_name(&self, name: impl Into<String>) -> Self {
+        let mut cloned = self.clone();
+        cloned.id = Uuid::new_v4().to_string();
+        cloned.name = name.into();
+        cloned.created_at = Utc::now();
+        cloned.last_launched_at = None;
+        cloned.playtime_secs = 0;
+        cloned
     }
 }
 
@@ -156,7 +212,19 @@ impl ProfileStore {
     }
 }
 
+fn default_theme_palette() -> String {
+    "synth_terminal".to_string()
+}
+
+pub const SUPPORTED_THEME_PALETTES: &[&str] = &[
+    "synth_terminal",
+    "gruvbox_pixel",
+    "tokyo_night",
+    "drafting_paper",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LauncherSettings {
     pub default_java_path: String,
     pub msa_client_id: String,
@@ -164,6 +232,10 @@ pub struct LauncherSettings {
     pub batch_launch_stagger_ms: u64,
     /// Max concurrent file downloads when preparing a version.
     pub max_concurrent_downloads: usize,
+    #[serde(default = "default_theme_palette")]
+    pub theme_palette: String,
+    #[serde(default)]
+    pub curseforge_api_key: String,
 }
 
 impl Default for LauncherSettings {
@@ -173,6 +245,8 @@ impl Default for LauncherSettings {
             msa_client_id: crate::account::DEFAULT_MSA_CLIENT_ID.to_string(),
             batch_launch_stagger_ms: 1500,
             max_concurrent_downloads: 16,
+            theme_palette: default_theme_palette(),
+            curseforge_api_key: String::new(),
         }
     }
 }
@@ -193,5 +267,17 @@ impl LauncherSettings {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
+    }
+
+    /// Returns the CurseForge API key from settings if non-empty, else from `MUB_CURSEFORGE_API_KEY`.
+    pub fn effective_curseforge_api_key(&self) -> Option<String> {
+        let trimmed = self.curseforge_api_key.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+        std::env::var("MUB_CURSEFORGE_API_KEY")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
     }
 }

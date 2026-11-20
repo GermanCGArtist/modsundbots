@@ -71,6 +71,38 @@ impl AppPaths {
         self.instance_dir(profile_id).join("mods")
     }
 
+    pub fn resourcepacks_dir(&self, profile_id: &str) -> PathBuf {
+        self.instance_dir(profile_id).join("resourcepacks")
+    }
+
+    pub fn shaderpacks_dir(&self, profile_id: &str) -> PathBuf {
+        self.instance_dir(profile_id).join("shaderpacks")
+    }
+
+    pub fn datapacks_dir(&self, profile_id: &str) -> PathBuf {
+        self.instance_dir(profile_id).join("datapacks")
+    }
+
+    pub fn saves_dir(&self, profile_id: &str) -> PathBuf {
+        self.instance_dir(profile_id).join("saves")
+    }
+
+    pub fn screenshots_dir(&self, profile_id: &str) -> PathBuf {
+        self.instance_dir(profile_id).join("screenshots")
+    }
+
+    pub fn config_dir(&self, profile_id: &str) -> PathBuf {
+        self.instance_dir(profile_id).join("config")
+    }
+
+    pub fn logs_dir(&self, profile_id: &str) -> PathBuf {
+        self.instance_dir(profile_id).join("logs")
+    }
+
+    pub fn icon_cache_dir(&self) -> PathBuf {
+        self.shared_dir().join("cache").join("icons")
+    }
+
     pub fn ensure_dirs(&self) -> Result<()> {
         for dir in [
             &self.root,
@@ -79,6 +111,7 @@ impl AppPaths {
             &self.libraries_dir(),
             &self.versions_dir(),
             &self.instances_dir(),
+            &self.icon_cache_dir(),
         ] {
             std::fs::create_dir_all(dir)?;
         }
@@ -88,4 +121,28 @@ impl AppPaths {
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// Create `path` if missing (when it has no extension or doesn't exist) and open it in the OS file manager.
+pub fn open_in_file_manager(path: &Path) -> Result<()> {
+    if !path.exists() {
+        std::fs::create_dir_all(path)?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer").arg(path).spawn()?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(path).spawn()?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(path).spawn()?;
+    }
+
+    Ok(())
 }

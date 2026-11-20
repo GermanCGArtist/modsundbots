@@ -1,180 +1,145 @@
+use std::sync::Arc;
+
 use eframe::egui::{
-    self, Color32, ColorImage, CornerRadius, IconData, Id, Margin, Mesh, Pos2, Rect, Response,
-    Sense, Shadow, Shape, Stroke, StrokeKind, TextureFilter, TextureHandle, TextureOptions,
-    TextureWrapMode, Vec2, epaint::RectShape,
+    self, Color32, ColorImage, CornerRadius, FontData, FontDefinitions, FontFamily, IconData, Id,
+    Margin, Pos2, Rect, Response, Sense, Shadow, Shape, Stroke, StrokeKind, TextureFilter,
+    TextureHandle, TextureOptions, TextureWrapMode, Vec2, epaint::RectShape,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlassMode {
-    Dark,
-    Light,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemePreset {
-    /// Signature ModsUndBots theme: obsidian-emerald & cyber-mint Liquid Glass
-    EmeraldPrism,
-    /// Classic Apple macOS Tahoe: deep sapphire & iris-violet Liquid Glass
-    TahoeSapphire,
-    /// Modder's edition: twilight obsidian & luminous amethyst geode glass
-    AmethystForge,
-    /// Apple Daylight Frost: frosted alabaster & sky/mint light Liquid Glass
-    DaylightFrost,
+    #[default]
+    SynthTerminal,
+    GruvboxPixel,
+    TokyoNight,
+    DraftingPaper,
 }
 
 impl ThemePreset {
     pub const ALL: [Self; 4] = [
-        Self::EmeraldPrism,
-        Self::TahoeSapphire,
-        Self::AmethystForge,
-        Self::DaylightFrost,
+        Self::SynthTerminal,
+        Self::GruvboxPixel,
+        Self::TokyoNight,
+        Self::DraftingPaper,
     ];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::SynthTerminal => "synth_terminal",
+            Self::GruvboxPixel => "gruvbox_pixel",
+            Self::TokyoNight => "tokyo_night",
+            Self::DraftingPaper => "drafting_paper",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "gruvbox_pixel" | "gruvbox" => Self::GruvboxPixel,
+            "tokyo_night" | "tokyo" => Self::TokyoNight,
+            "drafting_paper" | "paper" => Self::DraftingPaper,
+            _ => Self::SynthTerminal,
+        }
+    }
 
     pub const fn name(self) -> &'static str {
         match self {
-            Self::EmeraldPrism => "Emerald Prism",
-            Self::TahoeSapphire => "Tahoe Sapphire",
-            Self::AmethystForge => "Amethyst Forge",
-            Self::DaylightFrost => "Daylight Frost",
+            Self::SynthTerminal => "SYNTH TERMINAL",
+            Self::GruvboxPixel => "GRUVBOX PIXEL",
+            Self::TokyoNight => "TOKYO NIGHT",
+            Self::DraftingPaper => "DRAFTING PAPER",
         }
     }
 
     pub const fn subtitle(self) -> &'static str {
         match self {
-            Self::EmeraldPrism => "Signature ModsUndBots",
-            Self::TahoeSapphire => "macOS Tahoe Blue",
-            Self::AmethystForge => "Modder's Geode Violet",
-            Self::DaylightFrost => "Frosted Daylight",
+            Self::SynthTerminal => "Signature Multi-Hue",
+            Self::GruvboxPixel => "Warm Retro Arcade",
+            Self::TokyoNight => "Crisp Neon Dusk",
+            Self::DraftingPaper => "Clean Light Studio",
         }
     }
 
-    pub const fn mode(self) -> GlassMode {
-        match self {
-            Self::DaylightFrost => GlassMode::Light,
-            Self::EmeraldPrism | Self::TahoeSapphire | Self::AmethystForge => GlassMode::Dark,
-        }
+    pub const fn is_light(self) -> bool {
+        matches!(self, Self::DraftingPaper)
     }
 
-    pub const fn swatch_colors(self) -> (Color32, Color32, Color32) {
-        match self {
-            Self::EmeraldPrism => (
-                Color32::from_rgb(10, 26, 28),
-                Color32::from_rgb(36, 214, 148),
-                Color32::from_rgb(64, 212, 255),
-            ),
-            Self::TahoeSapphire => (
-                Color32::from_rgb(12, 20, 44),
-                Color32::from_rgb(56, 162, 255),
-                Color32::from_rgb(146, 98, 255),
-            ),
-            Self::AmethystForge => (
-                Color32::from_rgb(20, 14, 36),
-                Color32::from_rgb(176, 124, 255),
-                Color32::from_rgb(242, 114, 198),
-            ),
-            Self::DaylightFrost => (
-                Color32::from_rgb(226, 238, 255),
-                Color32::from_rgb(18, 176, 124),
-                Color32::from_rgb(0, 122, 255),
-            ),
-        }
+    /// Returns `[bg, focus, bot, player, mr, cf]` for the palette swatch card.
+    pub const fn swatch_colors(self) -> [Color32; 6] {
+        let p = Palette::for_preset(self);
+        [p.bg, p.focus, p.bot, p.player, p.mr, p.cf]
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlassFinish {
-    /// Unpolished / satin etched frosted glass with milky diffusion and subtle micro-grain
-    Frosted,
-    /// Clear / polished refractive liquid glass with crisp specular catchlights
-    Clear,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlassElevation {
-    /// Floating sidebar / primary navigation island (unpolished satin frost)
-    FloatingIsland,
-    /// Standard content card (unpolished frosted matte glass)
-    Card,
-    /// Floating toolbar / filter bar (clear polished liquid glass)
-    Toolbar,
-    /// Elevated / interactive sheet or toast (clear polished liquid glass)
-    Elevated,
-    /// Recessed track (segmented controls, search bars, icon wells)
-    Well,
-    /// Deep smoked frosted glass for live log terminal
-    Terminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonTone {
-    Primary,
+    Cta,
     Secondary,
-    Danger,
     Subtle,
+    Focus,
+    Modrinth,
+    CurseForge,
+    Bot,
+    Player,
+    Warn,
+    Danger,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavIcon {
     Instances,
-    Mods,
+    Discover,
     Accounts,
-    Logs,
-    Settings,
+    Console,
+    Config,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub preset: ThemePreset,
-    pub mode: GlassMode,
 
-    // Unpolished / frosted matte glass surfaces (cloudier, satin finish)
-    pub island_fill: Color32,
-    pub card_fill: Color32,
-    pub well_fill: Color32,
-    pub terminal_fill: Color32,
-    pub frost_grain_tint: Color32,
-    pub frost_haze_top: Color32,
+    // Surfaces & structural lines
+    pub bg: Color32,
+    pub panel: Color32,
+    pub surface: Color32,
+    pub raised: Color32,
+    pub hover: Color32,
+    pub border: Color32,
+    pub border_hi: Color32,
+    pub dot: Color32,
 
-    // Clear / polished liquid glass surfaces (more transparent, high specular)
-    pub toolbar_fill: Color32,
-    pub elevated_fill: Color32,
+    // Ink / typography
+    pub ink: Color32,
+    pub ink_dim: Color32,
+    pub ink_muted: Color32,
 
-    // Optical borders & specular highlights
-    pub border_subtle: Color32,
-    pub border_bright: Color32,
-    pub specular_top: Color32,
-    pub sheen_top: Color32,
-    pub divider: Color32,
-    pub shadow_color: Color32,
+    // 8 Semantic Roles (+ *_bg)
+    pub focus: Color32,
+    pub focus_bg: Color32,
+    pub on_focus: Color32,
 
-    // Interactive widget surfaces
-    pub control_fill: Color32,
-    pub control_hover: Color32,
-    pub control_active: Color32,
-    pub segment_thumb_fill: Color32,
-    pub segment_thumb_border: Color32,
+    pub cta_bg: Color32,
+    pub cta_fg: Color32,
 
-    // Typography
-    pub text_primary: Color32,
-    pub text_secondary: Color32,
-    pub text_muted: Color32,
-    pub text_on_accent: Color32,
+    pub bot: Color32,
+    pub bot_bg: Color32,
 
-    // Theme & semantic accents
-    pub accent_primary: Color32,
-    pub accent_blue: Color32,
-    pub accent_cyan: Color32,
-    pub accent_emerald: Color32,
-    pub accent_amber: Color32,
-    pub accent_red: Color32,
+    pub player: Color32,
+    pub player_bg: Color32,
 
-    // Tinted glass button fills
-    pub primary_glass_fill: Color32,
-    pub primary_glass_hover: Color32,
-    pub primary_glass_border: Color32,
-    pub danger_glass_fill: Color32,
-    pub danger_glass_hover: Color32,
-    pub danger_glass_border: Color32,
+    pub mr: Color32,
+    pub mr_bg: Color32,
+
+    pub cf: Color32,
+    pub cf_bg: Color32,
+
+    pub warn: Color32,
+    pub warn_bg: Color32,
+
+    pub meta: Color32,
+    pub meta_bg: Color32,
+
+    pub danger: Color32,
+    pub danger_bg: Color32,
 }
 
 const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
@@ -198,216 +163,316 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 impl Palette {
     pub const fn for_preset(preset: ThemePreset) -> Self {
         match preset {
-            ThemePreset::EmeraldPrism => Self {
+            ThemePreset::SynthTerminal => Self {
                 preset,
-                mode: GlassMode::Dark,
-                island_fill: rgba(24, 38, 46, 212),
-                card_fill: rgba(26, 40, 48, 190),
-                well_fill: rgba(10, 18, 24, 174),
-                terminal_fill: rgba(8, 14, 20, 228),
-                frost_grain_tint: rgba(210, 250, 240, 13),
-                frost_haze_top: rgba(196, 248, 236, 15),
+                bg: Color32::from_rgb(12, 14, 20),
+                panel: Color32::from_rgb(17, 20, 29),
+                surface: Color32::from_rgb(22, 27, 38),
+                raised: Color32::from_rgb(29, 36, 51),
+                hover: Color32::from_rgb(37, 46, 66),
+                border: Color32::from_rgb(39, 48, 67),
+                border_hi: Color32::from_rgb(59, 72, 99),
+                dot: rgba(165, 180, 210, 20),
 
-                toolbar_fill: rgba(20, 34, 42, 138),
-                elevated_fill: rgba(30, 46, 56, 176),
+                ink: Color32::from_rgb(237, 241, 248),
+                ink_dim: Color32::from_rgb(168, 179, 199),
+                ink_muted: Color32::from_rgb(125, 138, 161),
 
-                border_subtle: rgba(220, 255, 246, 32),
-                border_bright: rgba(220, 255, 246, 84),
-                specular_top: rgba(235, 255, 250, 132),
-                sheen_top: rgba(220, 255, 248, 24),
-                divider: rgba(220, 255, 246, 26),
-                shadow_color: rgba(2, 8, 12, 114),
+                focus: Color32::from_rgb(129, 140, 248),
+                focus_bg: rgba(129, 140, 248, 31),
+                on_focus: Color32::from_rgb(11, 14, 23),
 
-                control_fill: rgba(235, 255, 250, 18),
-                control_hover: rgba(235, 255, 250, 38),
-                control_active: rgba(36, 214, 148, 72),
-                segment_thumb_fill: rgba(225, 255, 246, 42),
-                segment_thumb_border: rgba(225, 255, 246, 108),
+                cta_bg: Color32::from_rgb(237, 241, 248),
+                cta_fg: Color32::from_rgb(12, 14, 20),
 
-                text_primary: Color32::from_rgb(242, 252, 250),
-                text_secondary: rgba(220, 242, 238, 210),
-                text_muted: rgba(168, 204, 200, 158),
-                text_on_accent: Color32::WHITE,
+                bot: Color32::from_rgb(192, 132, 252),
+                bot_bg: rgba(192, 132, 252, 31),
 
-                accent_primary: Color32::from_rgb(38, 222, 156),
-                accent_blue: Color32::from_rgb(64, 182, 255),
-                accent_cyan: Color32::from_rgb(82, 232, 248),
-                accent_emerald: Color32::from_rgb(44, 222, 146),
-                accent_amber: Color32::from_rgb(255, 202, 64),
-                accent_red: Color32::from_rgb(255, 96, 98),
+                player: Color32::from_rgb(56, 189, 248),
+                player_bg: rgba(56, 189, 248, 31),
 
-                primary_glass_fill: rgba(16, 168, 118, 218),
-                primary_glass_hover: rgba(28, 194, 138, 240),
-                primary_glass_border: rgba(154, 255, 220, 190),
-                danger_glass_fill: rgba(224, 56, 66, 208),
-                danger_glass_hover: rgba(244, 76, 86, 234),
-                danger_glass_border: rgba(255, 178, 182, 170),
+                mr: Color32::from_rgb(34, 211, 126),
+                mr_bg: rgba(34, 211, 126, 28),
+
+                cf: Color32::from_rgb(249, 115, 22),
+                cf_bg: rgba(249, 115, 22, 31),
+
+                warn: Color32::from_rgb(245, 183, 49),
+                warn_bg: rgba(245, 183, 49, 31),
+
+                meta: Color32::from_rgb(226, 188, 122),
+                meta_bg: rgba(226, 188, 122, 28),
+
+                danger: Color32::from_rgb(244, 91, 105),
+                danger_bg: rgba(244, 91, 105, 31),
             },
-            ThemePreset::TahoeSapphire => Self {
+            ThemePreset::GruvboxPixel => Self {
                 preset,
-                mode: GlassMode::Dark,
-                island_fill: rgba(34, 42, 62, 212),
-                card_fill: rgba(36, 44, 66, 188),
-                well_fill: rgba(14, 18, 30, 168),
-                terminal_fill: rgba(12, 15, 25, 224),
-                frost_grain_tint: rgba(230, 240, 255, 13),
-                frost_haze_top: rgba(220, 232, 255, 14),
+                bg: Color32::from_rgb(22, 20, 18),
+                panel: Color32::from_rgb(29, 27, 24),
+                surface: Color32::from_rgb(37, 34, 30),
+                raised: Color32::from_rgb(48, 43, 38),
+                hover: Color32::from_rgb(60, 54, 48),
+                border: Color32::from_rgb(60, 53, 46),
+                border_hi: Color32::from_rgb(87, 77, 67),
+                dot: rgba(235, 219, 178, 18),
 
-                toolbar_fill: rgba(28, 36, 56, 132),
-                elevated_fill: rgba(40, 50, 76, 168),
+                ink: Color32::from_rgb(242, 229, 188),
+                ink_dim: Color32::from_rgb(199, 184, 153),
+                ink_muted: Color32::from_rgb(155, 141, 118),
 
-                border_subtle: rgba(255, 255, 255, 32),
-                border_bright: rgba(255, 255, 255, 84),
-                specular_top: rgba(255, 255, 255, 128),
-                sheen_top: rgba(255, 255, 255, 24),
-                divider: rgba(255, 255, 255, 26),
-                shadow_color: rgba(2, 5, 14, 108),
+                focus: Color32::from_rgb(131, 165, 152),
+                focus_bg: rgba(131, 165, 152, 33),
+                on_focus: Color32::from_rgb(22, 20, 18),
 
-                control_fill: rgba(255, 255, 255, 18),
-                control_hover: rgba(255, 255, 255, 38),
-                control_active: rgba(10, 132, 255, 72),
-                segment_thumb_fill: rgba(255, 255, 255, 44),
-                segment_thumb_border: rgba(255, 255, 255, 108),
+                cta_bg: Color32::from_rgb(242, 229, 188),
+                cta_fg: Color32::from_rgb(22, 20, 18),
 
-                text_primary: Color32::from_rgb(245, 248, 255),
-                text_secondary: rgba(235, 242, 255, 208),
-                text_muted: rgba(196, 210, 238, 154),
-                text_on_accent: Color32::WHITE,
+                bot: Color32::from_rgb(211, 134, 155),
+                bot_bg: rgba(211, 134, 155, 33),
 
-                accent_primary: Color32::from_rgb(56, 162, 255),
-                accent_blue: Color32::from_rgb(56, 162, 255),
-                accent_cyan: Color32::from_rgb(90, 216, 255),
-                accent_emerald: Color32::from_rgb(48, 214, 128),
-                accent_amber: Color32::from_rgb(255, 198, 56),
-                accent_red: Color32::from_rgb(255, 92, 92),
+                player: Color32::from_rgb(108, 182, 200),
+                player_bg: rgba(108, 182, 200, 33),
 
-                primary_glass_fill: rgba(24, 144, 255, 212),
-                primary_glass_hover: rgba(56, 166, 255, 238),
-                primary_glass_border: rgba(180, 226, 255, 188),
-                danger_glass_fill: rgba(226, 58, 66, 206),
-                danger_glass_hover: rgba(244, 78, 86, 232),
-                danger_glass_border: rgba(255, 178, 182, 170),
+                mr: Color32::from_rgb(169, 182, 101),
+                mr_bg: rgba(169, 182, 101, 33),
+
+                cf: Color32::from_rgb(254, 128, 25),
+                cf_bg: rgba(254, 128, 25, 33),
+
+                warn: Color32::from_rgb(250, 189, 47),
+                warn_bg: rgba(250, 189, 47, 33),
+
+                meta: Color32::from_rgb(216, 166, 87),
+                meta_bg: rgba(216, 166, 87, 31),
+
+                danger: Color32::from_rgb(251, 73, 52),
+                danger_bg: rgba(251, 73, 52, 33),
             },
-            ThemePreset::AmethystForge => Self {
+            ThemePreset::TokyoNight => Self {
                 preset,
-                mode: GlassMode::Dark,
-                island_fill: rgba(40, 32, 60, 214),
-                card_fill: rgba(44, 34, 66, 190),
-                well_fill: rgba(18, 14, 30, 176),
-                terminal_fill: rgba(14, 10, 24, 228),
-                frost_grain_tint: rgba(240, 224, 255, 13),
-                frost_haze_top: rgba(238, 218, 255, 15),
+                bg: Color32::from_rgb(14, 17, 27),
+                panel: Color32::from_rgb(19, 23, 36),
+                surface: Color32::from_rgb(24, 29, 46),
+                raised: Color32::from_rgb(32, 39, 61),
+                hover: Color32::from_rgb(41, 50, 78),
+                border: Color32::from_rgb(41, 49, 74),
+                border_hi: Color32::from_rgb(62, 74, 110),
+                dot: rgba(122, 162, 247, 20),
 
-                toolbar_fill: rgba(34, 26, 54, 136),
-                elevated_fill: rgba(52, 40, 78, 174),
+                ink: Color32::from_rgb(228, 236, 250),
+                ink_dim: Color32::from_rgb(164, 177, 208),
+                ink_muted: Color32::from_rgb(122, 136, 168),
 
-                border_subtle: rgba(244, 228, 255, 34),
-                border_bright: rgba(244, 228, 255, 86),
-                specular_top: rgba(250, 238, 255, 132),
-                sheen_top: rgba(244, 228, 255, 24),
-                divider: rgba(244, 228, 255, 28),
-                shadow_color: rgba(6, 2, 16, 114),
+                focus: Color32::from_rgb(122, 162, 247),
+                focus_bg: rgba(122, 162, 247, 33),
+                on_focus: Color32::from_rgb(11, 15, 26),
 
-                control_fill: rgba(248, 236, 255, 18),
-                control_hover: rgba(248, 236, 255, 38),
-                control_active: rgba(168, 108, 255, 76),
-                segment_thumb_fill: rgba(248, 236, 255, 44),
-                segment_thumb_border: rgba(248, 236, 255, 108),
+                cta_bg: Color32::from_rgb(122, 162, 247),
+                cta_fg: Color32::from_rgb(11, 15, 26),
 
-                text_primary: Color32::from_rgb(248, 244, 255),
-                text_secondary: rgba(236, 224, 252, 210),
-                text_muted: rgba(198, 182, 226, 158),
-                text_on_accent: Color32::WHITE,
+                bot: Color32::from_rgb(187, 154, 247),
+                bot_bg: rgba(187, 154, 247, 33),
 
-                accent_primary: Color32::from_rgb(180, 126, 255),
-                accent_blue: Color32::from_rgb(112, 168, 255),
-                accent_cyan: Color32::from_rgb(132, 218, 255),
-                accent_emerald: Color32::from_rgb(56, 218, 156),
-                accent_amber: Color32::from_rgb(255, 198, 72),
-                accent_red: Color32::from_rgb(255, 96, 116),
+                player: Color32::from_rgb(125, 207, 255),
+                player_bg: rgba(125, 207, 255, 31),
 
-                primary_glass_fill: rgba(140, 82, 242, 218),
-                primary_glass_hover: rgba(164, 108, 255, 240),
-                primary_glass_border: rgba(226, 196, 255, 190),
-                danger_glass_fill: rgba(226, 58, 78, 206),
-                danger_glass_hover: rgba(244, 78, 98, 232),
-                danger_glass_border: rgba(255, 182, 192, 170),
+                mr: Color32::from_rgb(79, 214, 190),
+                mr_bg: rgba(79, 214, 190, 31),
+
+                cf: Color32::from_rgb(255, 158, 100),
+                cf_bg: rgba(255, 158, 100, 33),
+
+                warn: Color32::from_rgb(224, 175, 104),
+                warn_bg: rgba(224, 175, 104, 33),
+
+                meta: Color32::from_rgb(207, 201, 194),
+                meta_bg: rgba(207, 201, 194, 26),
+
+                danger: Color32::from_rgb(247, 118, 142),
+                danger_bg: rgba(247, 118, 142, 33),
             },
-            ThemePreset::DaylightFrost => Self {
+            ThemePreset::DraftingPaper => Self {
                 preset,
-                mode: GlassMode::Light,
-                island_fill: rgba(246, 250, 255, 214),
-                card_fill: rgba(248, 251, 255, 196),
-                well_fill: rgba(206, 220, 242, 148),
-                terminal_fill: rgba(18, 23, 36, 230),
-                frost_grain_tint: rgba(80, 105, 145, 14),
-                frost_haze_top: rgba(255, 255, 255, 58),
+                bg: Color32::from_rgb(243, 241, 234),
+                panel: Color32::from_rgb(234, 230, 220),
+                surface: Color32::from_rgb(250, 248, 243),
+                raised: Color32::from_rgb(228, 223, 211),
+                hover: Color32::from_rgb(218, 212, 197),
+                border: Color32::from_rgb(206, 199, 183),
+                border_hi: Color32::from_rgb(171, 162, 142),
+                dot: rgba(23, 26, 33, 20),
 
-                toolbar_fill: rgba(255, 255, 255, 138),
-                elevated_fill: rgba(255, 255, 255, 186),
+                ink: Color32::from_rgb(23, 26, 33),
+                ink_dim: Color32::from_rgb(68, 77, 92),
+                ink_muted: Color32::from_rgb(98, 107, 123),
 
-                border_subtle: rgba(255, 255, 255, 185),
-                border_bright: rgba(255, 255, 255, 245),
-                specular_top: rgba(255, 255, 255, 252),
-                sheen_top: rgba(255, 255, 255, 84),
-                divider: rgba(30, 50, 88, 26),
-                shadow_color: rgba(28, 48, 92, 34),
+                focus: Color32::from_rgb(59, 91, 219),
+                focus_bg: rgba(59, 91, 219, 26),
+                on_focus: Color32::from_rgb(250, 248, 243),
 
-                control_fill: rgba(255, 255, 255, 142),
-                control_hover: rgba(255, 255, 255, 212),
-                control_active: rgba(16, 168, 118, 44),
-                segment_thumb_fill: rgba(255, 255, 255, 238),
-                segment_thumb_border: rgba(255, 255, 255, 255),
+                cta_bg: Color32::from_rgb(23, 26, 33),
+                cta_fg: Color32::from_rgb(250, 248, 243),
 
-                text_primary: Color32::from_rgb(20, 28, 46),
-                text_secondary: Color32::from_rgb(48, 62, 88),
-                text_muted: Color32::from_rgb(92, 108, 136),
-                text_on_accent: Color32::WHITE,
+                bot: Color32::from_rgb(142, 60, 224),
+                bot_bg: rgba(142, 60, 224, 26),
 
-                accent_primary: Color32::from_rgb(14, 158, 112),
-                accent_blue: Color32::from_rgb(0, 118, 255),
-                accent_cyan: Color32::from_rgb(0, 154, 206),
-                accent_emerald: Color32::from_rgb(18, 166, 86),
-                accent_amber: Color32::from_rgb(204, 126, 0),
-                accent_red: Color32::from_rgb(220, 48, 48),
+                player: Color32::from_rgb(2, 132, 199),
+                player_bg: rgba(2, 132, 199, 26),
 
-                primary_glass_fill: rgba(14, 158, 112, 224),
-                primary_glass_hover: rgba(22, 178, 128, 244),
-                primary_glass_border: rgba(154, 242, 212, 215),
-                danger_glass_fill: rgba(226, 54, 58, 218),
-                danger_glass_hover: rgba(242, 72, 76, 240),
-                danger_glass_border: rgba(255, 188, 190, 200),
+                mr: Color32::from_rgb(15, 140, 88),
+                mr_bg: rgba(15, 140, 88, 26),
+
+                cf: Color32::from_rgb(217, 83, 30),
+                cf_bg: rgba(217, 83, 30, 26),
+
+                warn: Color32::from_rgb(176, 109, 0),
+                warn_bg: rgba(176, 109, 0, 28),
+
+                meta: Color32::from_rgb(138, 101, 38),
+                meta_bg: rgba(138, 101, 38, 26),
+
+                danger: Color32::from_rgb(201, 42, 56),
+                danger_bg: rgba(201, 42, 56, 26),
             },
+        }
+    }
+
+    /// Foreground color used on solid-filled semantic buttons (e.g. hover fill).
+    pub const fn on_solid(self) -> Color32 {
+        if self.preset.is_light() {
+            Color32::from_rgb(250, 248, 243)
+        } else {
+            Color32::from_rgb(9, 11, 14)
         }
     }
 }
 
-/// Lazily creates and caches a seamless 64x64 procedural micro-frost grain texture
-/// used on unpolished / matte frosted glass surfaces.
-fn frost_grain_texture(ctx: &egui::Context) -> TextureHandle {
-    let key = Id::new("mub_frost_grain_tex_v1");
+fn install_terminal_fonts_once(ctx: &egui::Context) {
+    let key = Id::new("mub_terminal_fonts_installed_v1");
+    if ctx.data(|d| d.get_temp::<bool>(key)).unwrap_or(false) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(key, true));
+
+    let candidates: &[&str] = if cfg!(target_os = "windows") {
+        &[
+            r"C:\Windows\Fonts\JetBrainsMono-Regular.ttf",
+            r"C:\Windows\Fonts\CascadiaMono.ttf",
+            r"C:\Windows\Fonts\consola.ttf",
+        ]
+    } else if cfg!(target_os = "macos") {
+        &[
+            "/Library/Fonts/JetBrainsMono-Regular.ttf",
+            "/System/Library/Fonts/SFNSMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+        ]
+    } else {
+        &[
+            "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
+            "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        ]
+    };
+
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            let mut fonts = FontDefinitions::default();
+            fonts
+                .font_data
+                .insert("mub_mono".to_owned(), Arc::new(FontData::from_owned(bytes)));
+            if let Some(fam) = fonts.families.get_mut(&FontFamily::Proportional) {
+                fam.insert(0, "mub_mono".to_owned());
+            }
+            if let Some(fam) = fonts.families.get_mut(&FontFamily::Monospace) {
+                fam.insert(0, "mub_mono".to_owned());
+            }
+            ctx.set_fonts(fonts);
+            break;
+        }
+    }
+}
+
+pub fn apply_theme(ctx: &egui::Context, preset: ThemePreset) {
+    install_terminal_fonts_once(ctx);
+
+    let p = Palette::for_preset(preset);
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = Vec2::new(6.0, 6.0);
+    style.spacing.button_padding = Vec2::new(10.0, 5.0);
+    style.spacing.window_margin = Margin::same(12);
+    style.spacing.interact_size.y = 26.0;
+    style.spacing.combo_height = 240.0;
+    style.spacing.scroll.bar_width = 8.0;
+    style.spacing.scroll.handle_min_length = 24.0;
+    style.animation_time = 0.08;
+
+    let mut visuals = if preset.is_light() {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+
+    visuals.dark_mode = !preset.is_light();
+    visuals.panel_fill = Color32::TRANSPARENT;
+    visuals.window_fill = p.raised;
+    visuals.extreme_bg_color = p.bg;
+    visuals.faint_bg_color = p.surface;
+    visuals.window_corner_radius = CornerRadius::ZERO;
+    visuals.menu_corner_radius = CornerRadius::ZERO;
+    visuals.window_stroke = Stroke::new(1.0_f32, p.border_hi);
+    visuals.window_shadow = Shadow::NONE;
+    visuals.popup_shadow = Shadow::NONE;
+    visuals.hyperlink_color = p.player;
+
+    visuals.widgets.noninteractive.bg_fill = p.surface;
+    visuals.widgets.noninteractive.weak_bg_fill = p.bg;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.border);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.ink);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::ZERO;
+
+    visuals.widgets.inactive.bg_fill = p.raised;
+    visuals.widgets.inactive.weak_bg_fill = p.raised;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border_hi);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.ink);
+    visuals.widgets.inactive.corner_radius = CornerRadius::ZERO;
+
+    visuals.widgets.hovered.bg_fill = p.hover;
+    visuals.widgets.hovered.weak_bg_fill = p.hover;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.ink_dim);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, p.ink);
+    visuals.widgets.hovered.corner_radius = CornerRadius::ZERO;
+
+    visuals.widgets.active.bg_fill = p.focus_bg;
+    visuals.widgets.active.weak_bg_fill = p.focus_bg;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.focus);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.ink);
+    visuals.widgets.active.corner_radius = CornerRadius::ZERO;
+
+    visuals.widgets.open.bg_fill = p.raised;
+    visuals.widgets.open.weak_bg_fill = p.raised;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, p.focus);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, p.ink);
+    visuals.widgets.open.corner_radius = CornerRadius::ZERO;
+
+    visuals.selection.bg_fill = p.focus_bg;
+    visuals.selection.stroke = Stroke::new(1.0_f32, p.focus);
+
+    style.visuals = visuals;
+    ctx.set_style(style);
+}
+
+fn dot_grid_texture(ctx: &egui::Context) -> TextureHandle {
+    let key = Id::new("mub_dot_grid_tex_16x16_v1");
     if let Some(tex) = ctx.data(|d| d.get_temp::<TextureHandle>(key)) {
         return tex;
     }
 
-    const N: usize = 64;
+    const N: usize = 16;
     let mut pixels = vec![Color32::TRANSPARENT; N * N];
-    for y in 0..N {
-        for x in 0..N {
-            let mut h = (x as u32).wrapping_mul(374_761_393)
-                ^ (y as u32).wrapping_mul(668_265_263)
-                ^ 0x9E37_79B9;
-            h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
-            h ^= h >> 16;
-            let v = (h & 0xFF) as u8;
-            let alpha = if v > 150 {
-                ((v - 150) as u16 * 2).min(255) as u8
-            } else {
-                0
-            };
-            pixels[y * N + x] = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
-        }
-    }
+    pixels[0] = Color32::WHITE;
 
     let img = ColorImage {
         size: [N, N],
@@ -419,947 +484,397 @@ fn frost_grain_texture(ctx: &egui::Context) -> TextureHandle {
         wrap_mode: TextureWrapMode::Repeat,
         mipmap_mode: None,
     };
-    let tex = ctx.load_texture("mub_frost_grain", img, opts);
+    let tex = ctx.load_texture("mub_dot_grid_16", img, opts);
     ctx.data_mut(|d| d.insert_temp(key, tex.clone()));
     tex
 }
 
-pub fn apply_theme(ctx: &egui::Context, preset: ThemePreset) {
-    let p = Palette::for_preset(preset);
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-    style.spacing.button_padding = Vec2::new(14.0, 7.0);
-    style.spacing.window_margin = Margin::same(16);
-    style.spacing.interact_size.y = 28.0;
-    style.spacing.combo_height = 240.0;
-    style.animation_time = 0.22;
-
-    let mut visuals = match p.mode {
-        GlassMode::Dark => egui::Visuals::dark(),
-        GlassMode::Light => egui::Visuals::light(),
-    };
-
-    visuals.panel_fill = Color32::TRANSPARENT;
-    visuals.window_fill = p.elevated_fill;
-    visuals.extreme_bg_color = p.well_fill;
-    visuals.faint_bg_color = p.island_fill;
-    visuals.window_corner_radius = CornerRadius::same(18);
-    visuals.window_stroke = Stroke::new(1.0_f32, p.border_bright);
-    visuals.window_shadow = Shadow {
-        offset: [0, 12],
-        blur: 28,
-        spread: 0,
-        color: p.shadow_color,
-    };
-    visuals.popup_shadow = Shadow {
-        offset: [0, 8],
-        blur: 22,
-        spread: 0,
-        color: p.shadow_color,
-    };
-    visuals.hyperlink_color = p.accent_primary;
-
-    visuals.widgets.noninteractive.bg_fill = p.card_fill;
-    visuals.widgets.noninteractive.weak_bg_fill = p.well_fill;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.border_subtle);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(14);
-
-    visuals.widgets.inactive.bg_fill = p.control_fill;
-    visuals.widgets.inactive.weak_bg_fill = p.control_fill;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border_subtle);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(14);
-
-    visuals.widgets.hovered.bg_fill = p.control_hover;
-    visuals.widgets.hovered.weak_bg_fill = p.control_hover;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.border_bright);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(14);
-
-    visuals.widgets.active.bg_fill = p.control_active;
-    visuals.widgets.active.weak_bg_fill = p.control_active;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.accent_primary);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
-    visuals.widgets.active.corner_radius = CornerRadius::same(14);
-
-    visuals.widgets.open.bg_fill = p.elevated_fill;
-    visuals.widgets.open.weak_bg_fill = p.elevated_fill;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, p.border_bright);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, p.text_primary);
-    visuals.widgets.open.corner_radius = CornerRadius::same(14);
-
-    visuals.selection.bg_fill = rgba(
-        p.accent_primary.r(),
-        p.accent_primary.g(),
-        p.accent_primary.b(),
-        64,
-    );
-    visuals.selection.stroke = Stroke::new(1.0_f32, p.accent_primary);
-
-    style.visuals = visuals;
-    ctx.set_style(style);
-}
-
-/// Paints a lush atmospheric Liquid Glass wallpaper tailored to the active `ThemePreset`.
-pub fn paint_liquid_backdrop(ctx: &egui::Context, preset: ThemePreset) {
+/// Paints the solid terminal background and a single GPU-tiled 16x16 dot-grid pattern.
+pub fn paint_dot_grid_backdrop(ctx: &egui::Context, palette: &Palette) {
     let rect = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::background());
+    painter.rect_filled(rect, CornerRadius::ZERO, palette.bg);
 
-    let colors = match preset {
-        ThemePreset::EmeraldPrism => [
-            [
-                Color32::from_rgb(8, 28, 30),
-                Color32::from_rgb(9, 20, 32),
-                Color32::from_rgb(10, 30, 44),
-            ],
-            [
-                Color32::from_rgb(7, 18, 26),
-                Color32::from_rgb(10, 22, 30),
-                Color32::from_rgb(12, 26, 40),
-            ],
-            [
-                Color32::from_rgb(6, 14, 20),
-                Color32::from_rgb(10, 28, 32),
-                Color32::from_rgb(8, 22, 36),
-            ],
-        ],
-        ThemePreset::TahoeSapphire => [
-            [
-                Color32::from_rgb(10, 22, 46),
-                Color32::from_rgb(12, 18, 42),
-                Color32::from_rgb(18, 28, 62),
-            ],
-            [
-                Color32::from_rgb(8, 17, 34),
-                Color32::from_rgb(14, 18, 38),
-                Color32::from_rgb(24, 18, 52),
-            ],
-            [
-                Color32::from_rgb(7, 13, 24),
-                Color32::from_rgb(16, 22, 44),
-                Color32::from_rgb(10, 26, 40),
-            ],
-        ],
-        ThemePreset::AmethystForge => [
-            [
-                Color32::from_rgb(22, 14, 42),
-                Color32::from_rgb(18, 14, 36),
-                Color32::from_rgb(36, 18, 52),
-            ],
-            [
-                Color32::from_rgb(16, 12, 30),
-                Color32::from_rgb(22, 16, 38),
-                Color32::from_rgb(32, 16, 46),
-            ],
-            [
-                Color32::from_rgb(12, 10, 24),
-                Color32::from_rgb(26, 14, 44),
-                Color32::from_rgb(16, 18, 38),
-            ],
-        ],
-        ThemePreset::DaylightFrost => [
-            [
-                Color32::from_rgb(212, 240, 238),
-                Color32::from_rgb(228, 240, 255),
-                Color32::from_rgb(230, 226, 255),
-            ],
-            [
-                Color32::from_rgb(216, 244, 248),
-                Color32::from_rgb(238, 246, 255),
-                Color32::from_rgb(242, 234, 254),
-            ],
-            [
-                Color32::from_rgb(216, 246, 238),
-                Color32::from_rgb(230, 242, 255),
-                Color32::from_rgb(218, 238, 255),
-            ],
-        ],
-    };
-
-    let xs = [rect.left(), rect.center().x, rect.right()];
-    let ys = [rect.top(), rect.center().y, rect.bottom()];
-
-    let mut mesh = Mesh::default();
-    for (iy, &y) in ys.iter().enumerate() {
-        for (ix, &x) in xs.iter().enumerate() {
-            mesh.colored_vertex(Pos2::new(x, y), colors[iy][ix]);
-        }
-    }
-    for iy in 0..2_u32 {
-        for ix in 0..2_u32 {
-            let tl = iy * 3 + ix;
-            let tr = tl + 1;
-            let bl = tl + 3;
-            let br = bl + 1;
-            mesh.add_triangle(tl, tr, br);
-            mesh.add_triangle(tl, br, bl);
-        }
-    }
-    painter.add(Shape::mesh(mesh));
-
-    struct CausticOrb {
-        fx: f32,
-        fy: f32,
-        fr: f32,
-        rgb: (u8, u8, u8),
-        peak_alpha: u8,
-    }
-
-    let w = rect.width();
-    let h = rect.height();
-    let orbs: &[CausticOrb] = match preset {
-        ThemePreset::EmeraldPrism => &[
-            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.36, rgb: (32, 224, 152), peak_alpha: 38 },
-            CausticOrb { fx: 0.84, fy: 0.22, fr: 0.38, rgb: (44, 196, 255), peak_alpha: 34 },
-            CausticOrb { fx: 0.72, fy: 0.84, fr: 0.36, rgb: (24, 210, 170), peak_alpha: 32 },
-            CausticOrb { fx: 0.26, fy: 0.80, fr: 0.30, rgb: (56, 138, 255), peak_alpha: 24 },
-        ],
-        ThemePreset::TahoeSapphire => &[
-            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.34, rgb: (40, 175, 255), peak_alpha: 36 },
-            CausticOrb { fx: 0.84, fy: 0.20, fr: 0.38, rgb: (142, 92, 255), peak_alpha: 34 },
-            CausticOrb { fx: 0.76, fy: 0.84, fr: 0.36, rgb: (36, 214, 152), peak_alpha: 30 },
-            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.30, rgb: (48, 128, 255), peak_alpha: 26 },
-        ],
-        ThemePreset::AmethystForge => &[
-            CausticOrb { fx: 0.16, fy: 0.18, fr: 0.36, rgb: (172, 98, 255), peak_alpha: 40 },
-            CausticOrb { fx: 0.84, fy: 0.22, fr: 0.38, rgb: (244, 102, 194), peak_alpha: 34 },
-            CausticOrb { fx: 0.74, fy: 0.84, fr: 0.34, rgb: (106, 132, 255), peak_alpha: 30 },
-            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.30, rgb: (196, 118, 255), peak_alpha: 26 },
-        ],
-        ThemePreset::DaylightFrost => &[
-            CausticOrb { fx: 0.14, fy: 0.16, fr: 0.38, rgb: (96, 224, 186), peak_alpha: 64 },
-            CausticOrb { fx: 0.84, fy: 0.20, fr: 0.40, rgb: (132, 194, 255), peak_alpha: 58 },
-            CausticOrb { fx: 0.76, fy: 0.84, fr: 0.38, rgb: (176, 156, 255), peak_alpha: 52 },
-            CausticOrb { fx: 0.24, fy: 0.82, fr: 0.32, rgb: (118, 218, 246), peak_alpha: 50 },
-        ],
-    };
-
-    let min_dim = w.min(h).max(400.0);
-    for orb in orbs {
-        let (r, g, b) = orb.rgb;
-        let center = Pos2::new(rect.left() + w * orb.fx, rect.top() + h * orb.fy);
-        let max_radius = min_dim * orb.fr;
-        const RINGS: usize = 6;
-        for step in 0..RINGS {
-            let t = (step + 1) as f32 / RINGS as f32;
-            let radius = max_radius * t;
-            let falloff = (1.0 - t * 0.85).powi(2);
-            let alpha = ((orb.peak_alpha as f32 * falloff) / 1.4)
-                .round()
-                .clamp(1.0, 255.0) as u8;
-            painter.circle_filled(center, radius, rgba(r, g, b, alpha));
-        }
-    }
+    let tex = dot_grid_texture(ctx);
+    let uv = Rect::from_min_max(
+        Pos2::ZERO,
+        Pos2::new(rect.width() / 16.0, rect.height() / 16.0),
+    );
+    let dot_rect = RectShape::filled(rect, CornerRadius::ZERO, palette.dot).with_texture(tex.id(), uv);
+    painter.add(Shape::Rect(dot_rect));
 }
 
-/// Renders a multi-layered Apple Liquid Glass container supporting both
-/// **Unpolished / Frosted** satin matte glass (with micro-grain texture & soft haze)
-/// and **Clear / Polished** liquid glass (with crisp specular rim highlights).
-pub fn glass_box<R>(
+/// Sharp 0px-radius terminal box with 1px inside border.
+pub fn term_box<R>(
     ui: &mut egui::Ui,
-    palette: &Palette,
-    elevation: GlassElevation,
-    radius: u8,
+    bg: Color32,
+    border: Color32,
     margin: Margin,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    let bg_idx = ui.painter().add(Shape::Noop);
-
-    let inner = egui::Frame::NONE
+    egui::Frame::new()
+        .fill(bg)
+        .stroke(Stroke::new(1.0_f32, border))
+        .corner_radius(CornerRadius::ZERO)
         .inner_margin(margin)
-        .show(ui, add_contents);
+        .show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), add_contents)
+                .inner
+        })
+}
 
+/// Standard surface container (`palette.surface`, `palette.border`).
+pub fn term_surface<R>(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    term_box(ui, palette.surface, palette.border, Margin::same(12), add_contents)
+}
+
+/// Raised card / modal / hero container (`palette.raised`, `palette.border_hi`).
+pub fn term_raised<R>(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    term_box(ui, palette.raised, palette.border_hi, Margin::same(12), add_contents)
+}
+
+/// Interactive list row container that highlights from `surface`/`border` to `raised`/`border_hi` on hover.
+pub fn term_row<R>(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let bg_idx = ui.painter().add(Shape::Noop);
+    let inner = egui::Frame::NONE
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), add_contents)
+                .inner
+        });
     let rect = inner.response.rect;
-    let cr = CornerRadius::same(radius);
-    let r_f32 = radius as f32;
-
-    let (fill, border, shadow_blur, shadow_y, finish) = match elevation {
-        GlassElevation::FloatingIsland => (
-            palette.island_fill,
-            palette.border_bright,
-            26,
-            10,
-            GlassFinish::Frosted,
-        ),
-        GlassElevation::Card => (
-            palette.card_fill,
-            palette.border_subtle,
-            16,
-            5,
-            GlassFinish::Frosted,
-        ),
-        GlassElevation::Toolbar => (
-            palette.toolbar_fill,
-            palette.border_bright,
-            18,
-            6,
-            GlassFinish::Clear,
-        ),
-        GlassElevation::Elevated => (
-            palette.elevated_fill,
-            palette.border_bright,
-            24,
-            8,
-            GlassFinish::Clear,
-        ),
-        GlassElevation::Well => (
-            palette.well_fill,
-            palette.border_subtle,
-            0,
-            0,
-            GlassFinish::Frosted,
-        ),
-        GlassElevation::Terminal => (
-            palette.terminal_fill,
-            palette.border_subtle,
-            20,
-            8,
-            GlassFinish::Frosted,
-        ),
-    };
-
-    let mut shapes = Vec::with_capacity(6);
-
-    if shadow_blur > 0 {
-        let shadow = Shadow {
-            offset: [0, shadow_y],
-            blur: shadow_blur,
-            spread: 0,
-            color: palette.shadow_color,
-        };
-        shapes.push(Shape::Rect(shadow.as_shape(rect, cr)));
-    }
-
-    shapes.push(Shape::rect_filled(rect, cr, fill));
-
-    match finish {
-        GlassFinish::Frosted => {
-            if rect.width() > 8.0 && rect.height() > 8.0 {
-                let grain_tex = frost_grain_texture(ui.ctx());
-                let uv = Rect::from_min_max(
-                    Pos2::ZERO,
-                    Pos2::new(rect.width() / 64.0, rect.height() / 64.0),
-                );
-                let grain_shape = RectShape::filled(rect, cr, palette.frost_grain_tint)
-                    .with_texture(grain_tex.id(), uv);
-                shapes.push(Shape::Rect(grain_shape));
-            }
-
-            if elevation != GlassElevation::Well && rect.height() > 28.0 && rect.width() > 28.0 {
-                let haze_h = (rect.height() * 0.55).clamp(18.0, 96.0);
-                let inset = 1.5_f32;
-                let top_rect = Rect::from_min_max(
-                    Pos2::new(rect.left() + inset, rect.top() + inset),
-                    Pos2::new(
-                        rect.right() - inset,
-                        (rect.top() + haze_h).min(rect.bottom() - inset),
-                    ),
-                );
-                let mut haze = Mesh::default();
-                let corner_pad = (r_f32 * 0.45).min(top_rect.width() * 0.25);
-                haze.colored_vertex(
-                    Pos2::new(top_rect.left() + corner_pad, top_rect.top()),
-                    palette.frost_haze_top,
-                );
-                haze.colored_vertex(
-                    Pos2::new(top_rect.right() - corner_pad, top_rect.top()),
-                    palette.frost_haze_top,
-                );
-                haze.colored_vertex(
-                    Pos2::new(top_rect.left(), top_rect.bottom()),
-                    Color32::TRANSPARENT,
-                );
-                haze.colored_vertex(
-                    Pos2::new(top_rect.right(), top_rect.bottom()),
-                    Color32::TRANSPARENT,
-                );
-                haze.add_triangle(0, 1, 3);
-                haze.add_triangle(0, 3, 2);
-                shapes.push(Shape::mesh(haze));
-            }
-        }
-        GlassFinish::Clear => {
-            if rect.height() > 24.0 && rect.width() > 24.0 {
-                let sheen_h = (rect.height() * 0.34).clamp(12.0, 40.0);
-                let inset = 1.5_f32;
-                let top_rect = Rect::from_min_max(
-                    Pos2::new(rect.left() + inset, rect.top() + inset),
-                    Pos2::new(
-                        rect.right() - inset,
-                        (rect.top() + sheen_h).min(rect.bottom() - inset),
-                    ),
-                );
-                let mut sheen = Mesh::default();
-                let corner_pad = (r_f32 * 0.45).min(top_rect.width() * 0.25);
-                sheen.colored_vertex(
-                    Pos2::new(top_rect.left() + corner_pad, top_rect.top()),
-                    palette.sheen_top,
-                );
-                sheen.colored_vertex(
-                    Pos2::new(top_rect.right() - corner_pad, top_rect.top()),
-                    palette.sheen_top,
-                );
-                sheen.colored_vertex(
-                    Pos2::new(top_rect.left(), top_rect.bottom()),
-                    Color32::TRANSPARENT,
-                );
-                sheen.colored_vertex(
-                    Pos2::new(top_rect.right(), top_rect.bottom()),
-                    Color32::TRANSPARENT,
-                );
-                sheen.add_triangle(0, 1, 3);
-                sheen.add_triangle(0, 3, 2);
-                shapes.push(Shape::mesh(sheen));
-            }
-        }
-    }
-
-    shapes.push(Shape::rect_stroke(
-        rect,
-        cr,
-        Stroke::new(1.0_f32, border),
-        StrokeKind::Inside,
-    ));
-
-    if elevation != GlassElevation::Well && rect.width() > r_f32 * 2.0 + 12.0 {
-        let y = rect.top() + 1.0;
-        let x0 = rect.left() + r_f32.max(10.0);
-        let x1 = rect.right() - r_f32.max(10.0);
-        let rim_col = match finish {
-            GlassFinish::Clear => palette.specular_top,
-            GlassFinish::Frosted => rgba(
-                palette.specular_top.r(),
-                palette.specular_top.g(),
-                palette.specular_top.b(),
-                palette.specular_top.a() / 2,
+    let hovered = ui.rect_contains_pointer(rect);
+    let fill = if hovered { palette.raised } else { palette.surface };
+    let border = if hovered { palette.border_hi } else { palette.border };
+    ui.painter().set(
+        bg_idx,
+        Shape::Vec(vec![
+            Shape::rect_filled(rect, CornerRadius::ZERO, fill),
+            Shape::rect_stroke(
+                rect,
+                CornerRadius::ZERO,
+                Stroke::new(1.0_f32, border),
+                StrokeKind::Inside,
             ),
-        };
-        shapes.push(Shape::line_segment(
-            [Pos2::new(x0, y), Pos2::new(x1, y)],
-            Stroke::new(1.0_f32, rim_col),
-        ));
-    }
-
-    ui.painter().set(bg_idx, Shape::Vec(shapes));
+        ]),
+    );
     inner
 }
 
-pub fn glass_card<R>(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    glass_box(
-        ui,
-        palette,
-        GlassElevation::Card,
-        18,
-        Margin::same(16),
-        add_contents,
-    )
-}
-
-pub fn glass_elevated<R>(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    glass_box(
-        ui,
-        palette,
-        GlassElevation::Elevated,
-        20,
-        Margin::same(18),
-        add_contents,
-    )
-}
-
-pub fn glass_toolbar<R>(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    glass_box(
-        ui,
-        palette,
-        GlassElevation::Toolbar,
-        18,
-        Margin::symmetric(14, 10),
-        add_contents,
-    )
-}
-
-pub fn glass_rail<R>(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    glass_box(
-        ui,
-        palette,
-        GlassElevation::FloatingIsland,
-        20,
-        Margin::same(16),
-        add_contents,
-    )
-}
-
-pub fn glass_terminal<R>(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    glass_box(
-        ui,
-        palette,
-        GlassElevation::Terminal,
-        18,
-        Margin::same(0),
-        add_contents,
-    )
-}
-
-/// Interactive Liquid Glass Theme Preset swatch card for Settings.
-pub fn theme_swatch_card(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    preset: ThemePreset,
-    selected: bool,
-) -> Response {
-    let desired = Vec2::new(172.0, 82.0);
-    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
-
-    if ui.is_rect_visible(rect) {
-        let sel_t = ui
-            .ctx()
-            .animate_bool_with_time(resp.id.with("sel"), selected, 0.18);
-        let hov_t = ui
-            .ctx()
-            .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
-
-        let cr = CornerRadius::same(16);
-        let p = ui.painter();
-        let (bg_base, orb_a, orb_b) = preset.swatch_colors();
-
-        // Card fill
-        let fill = lerp_color(palette.well_fill, palette.control_hover, (sel_t * 0.6 + hov_t * 0.35).min(1.0));
-        p.rect_filled(rect, cr, fill);
-
-        let border_col = lerp_color(palette.border_subtle, palette.accent_primary, sel_t.max(hov_t * 0.4));
-        p.rect_stroke(
-            rect,
-            cr,
-            Stroke::new(if selected { 1.6_f32 } else { 1.0_f32 }, border_col),
-            StrokeKind::Inside,
-        );
-
-        // Mini Liquid Glass wallpaper preview pill at top of swatch
-        let preview = Rect::from_min_size(
-            Pos2::new(rect.left() + 10.0, rect.top() + 10.0),
-            Vec2::new(rect.width() - 20.0, 26.0),
-        );
-        let pcr = CornerRadius::same(9);
-        p.rect_filled(preview, pcr, bg_base);
-        p.circle_filled(
-            Pos2::new(preview.left() + 22.0, preview.center().y),
-            12.0,
-            rgba(orb_a.r(), orb_a.g(), orb_a.b(), 185),
-        );
-        p.circle_filled(
-            Pos2::new(preview.right() - 26.0, preview.center().y),
-            12.0,
-            rgba(orb_b.r(), orb_b.g(), orb_b.b(), 165),
-        );
-        p.rect_stroke(
-            preview,
-            pcr,
-            Stroke::new(1.0_f32, rgba(255, 255, 255, 90)),
-            StrokeKind::Inside,
-        );
-
-        // Name & subtitle
-        let name_galley = p.layout_no_wrap(
-            preset.name().to_string(),
-            egui::FontId::proportional(13.0),
-            palette.text_primary,
-        );
-        p.galley(
-            Pos2::new(rect.left() + 12.0, rect.top() + 43.0),
-            name_galley,
-            palette.text_primary,
-        );
-
-        let sub_galley = p.layout_no_wrap(
-            preset.subtitle().to_string(),
-            egui::FontId::proportional(10.5),
-            palette.text_muted,
-        );
-        p.galley(
-            Pos2::new(rect.left() + 12.0, rect.top() + 60.0),
-            sub_galley,
-            palette.text_muted,
-        );
-
-        if selected {
-            p.circle_filled(
-                Pos2::new(rect.right() - 16.0, rect.top() + 50.0),
-                4.0,
-                palette.accent_primary,
-            );
-        }
-    }
-
-    resp
-}
-
-/// Apple Liquid Glass capsule button with smooth animated hover/press transitions
-/// and specular top catchlight.
-pub fn pill_button(
+/// Sharp 1px rectangular terminal button supporting all semantic tones.
+pub fn term_button(
     ui: &mut egui::Ui,
     palette: &Palette,
     label: &str,
     tone: ButtonTone,
 ) -> Response {
-    let (fill, hover_fill, stroke_col, text_col) = match tone {
-        ButtonTone::Primary => (
-            palette.primary_glass_fill,
-            palette.primary_glass_hover,
-            palette.primary_glass_border,
-            palette.text_on_accent,
-        ),
-        ButtonTone::Danger => (
-            palette.danger_glass_fill,
-            palette.danger_glass_hover,
-            palette.danger_glass_border,
-            palette.text_on_accent,
+    let solid_fg = palette.on_solid();
+    let (fill, hover_fill, stroke, hover_stroke, fg, hover_fg) = match tone {
+        ButtonTone::Cta => (
+            palette.cta_bg,
+            lerp_color(palette.cta_bg, palette.bg, 0.14),
+            palette.cta_bg,
+            palette.cta_bg,
+            palette.cta_fg,
+            palette.cta_fg,
         ),
         ButtonTone::Secondary => (
-            palette.control_fill,
-            palette.control_hover,
-            palette.border_bright,
-            palette.text_primary,
+            palette.raised,
+            palette.hover,
+            palette.border_hi,
+            palette.ink_dim,
+            palette.ink,
+            palette.ink,
         ),
         ButtonTone::Subtle => (
             Color32::TRANSPARENT,
-            palette.control_fill,
-            palette.border_subtle,
-            palette.text_secondary,
+            palette.surface,
+            palette.border,
+            palette.border_hi,
+            palette.ink_dim,
+            palette.ink,
+        ),
+        ButtonTone::Focus => (
+            palette.focus_bg,
+            palette.focus,
+            palette.focus,
+            palette.focus,
+            palette.focus,
+            solid_fg,
+        ),
+        ButtonTone::Modrinth => (
+            palette.mr_bg,
+            palette.mr,
+            palette.mr,
+            palette.mr,
+            palette.mr,
+            solid_fg,
+        ),
+        ButtonTone::CurseForge => (
+            palette.cf_bg,
+            palette.cf,
+            palette.cf,
+            palette.cf,
+            palette.cf,
+            solid_fg,
+        ),
+        ButtonTone::Bot => (
+            palette.bot_bg,
+            palette.bot,
+            palette.bot,
+            palette.bot,
+            palette.bot,
+            solid_fg,
+        ),
+        ButtonTone::Player => (
+            palette.player_bg,
+            palette.player,
+            palette.player,
+            palette.player,
+            palette.player,
+            solid_fg,
+        ),
+        ButtonTone::Warn => (
+            palette.warn_bg,
+            palette.warn,
+            palette.warn,
+            palette.warn,
+            palette.warn,
+            solid_fg,
+        ),
+        ButtonTone::Danger => (
+            palette.danger_bg,
+            palette.danger,
+            palette.danger,
+            palette.danger,
+            palette.danger,
+            solid_fg,
         ),
     };
 
-    let font_id = egui::FontId::proportional(13.0);
-    let galley = ui
+    let font_id = egui::FontId::monospace(12.0);
+    let measure = ui
         .painter()
-        .layout_no_wrap(label.to_string(), font_id, text_col);
-    let desired = Vec2::new((galley.size().x + 28.0).max(64.0), 32.0);
+        .layout_no_wrap(label.to_string(), font_id.clone(), fg);
+    let desired = Vec2::new((measure.size().x + 18.0).max(44.0), 26.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
     if ui.is_rect_visible(rect) {
-        let hover_t = ui
-            .ctx()
-            .animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.14);
-        let press_t = ui.ctx().animate_bool_with_time(
-            resp.id.with("press"),
-            resp.is_pointer_button_down_on(),
-            0.09,
-        );
-
-        let draw_rect = rect.shrink(press_t * 0.9);
-        let cr = CornerRadius::same((draw_rect.height() * 0.5) as u8);
-        let bg = lerp_color(fill, hover_fill, (hover_t + press_t * 0.5).min(1.0));
+        let active = resp.hovered() || resp.is_pointer_button_down_on();
+        let bg = if active { hover_fill } else { fill };
+        let brd = if active { hover_stroke } else { stroke };
+        let txt_col = if active { hover_fg } else { fg };
 
         let p = ui.painter();
-        if matches!(tone, ButtonTone::Primary | ButtonTone::Danger) {
-            let glow_alpha = (56.0 + hover_t * 40.0) as u8;
-            let glow = Shadow {
-                offset: [0, 3],
-                blur: (12.0 + hover_t * 5.0) as u8,
-                spread: 0,
-                color: rgba(fill.r(), fill.g(), fill.b(), glow_alpha),
-            };
-            p.add(glow.as_shape(draw_rect, cr));
-        }
-
-        p.rect_filled(draw_rect, cr, bg);
-        let stroke_a = lerp_color(stroke_col, Color32::WHITE, hover_t * 0.25);
-        p.rect_stroke(draw_rect, cr, Stroke::new(1.0_f32, stroke_a), StrokeKind::Inside);
-
         if bg.a() > 0 {
-            let pad = draw_rect.height() * 0.45;
-            p.line_segment(
-                [
-                    Pos2::new(draw_rect.left() + pad, draw_rect.top() + 1.0),
-                    Pos2::new(draw_rect.right() - pad, draw_rect.top() + 1.0),
-                ],
-                Stroke::new(
-                    1.0_f32,
-                    rgba(255, 255, 255, (96.0 + hover_t * 50.0) as u8),
-                ),
-            );
+            p.rect_filled(rect, CornerRadius::ZERO, bg);
         }
-
-        let text_pos = Pos2::new(
-            draw_rect.center().x - galley.size().x * 0.5,
-            draw_rect.center().y - galley.size().y * 0.5,
+        p.rect_stroke(
+            rect,
+            CornerRadius::ZERO,
+            Stroke::new(1.0_f32, brd),
+            StrokeKind::Inside,
         );
-        p.galley(text_pos, galley, text_col);
+
+        let galley = p.layout_no_wrap(label.to_string(), font_id, txt_col);
+        p.galley(
+            Pos2::new(
+                rect.center().x - galley.size().x * 0.5,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            txt_col,
+        );
     }
 
     resp
 }
 
-/// Apple Liquid Glass animated pill toggle switch (with iOS 26-style liquid thumb glide & stretch).
-pub fn glass_toggle(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    on: &mut bool,
-    label: &str,
-) -> Response {
-    let mut changed = false;
-    let resp = ui
-        .horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-
-            let desired = Vec2::new(42.0, 24.0);
-            let (rect, switch_resp) = ui.allocate_exact_size(desired, Sense::click());
-            if switch_resp.clicked() {
-                *on = !*on;
-                changed = true;
-            }
-
-            if ui.is_rect_visible(rect) {
-                let t = ui
-                    .ctx()
-                    .animate_bool_with_time(switch_resp.id.with("toggle"), *on, 0.22);
-                let hover_t = ui.ctx().animate_bool_with_time(
-                    switch_resp.id.with("hover"),
-                    switch_resp.hovered(),
-                    0.14,
-                );
-                let press_t = ui.ctx().animate_bool_with_time(
-                    switch_resp.id.with("press"),
-                    switch_resp.is_pointer_button_down_on(),
-                    0.10,
-                );
-
-                let motion_stretch = (1.0 - (2.0 * t - 1.0).abs()) * 5.0 + press_t * 3.5;
-
-                let p = ui.painter();
-                let track_cr = CornerRadius::same((rect.height() * 0.5) as u8);
-                let off_track = palette.well_fill;
-                let on_track = rgba(
-                    palette.accent_primary.r(),
-                    palette.accent_primary.g(),
-                    palette.accent_primary.b(),
-                    218,
-                );
-                let track_fill = lerp_color(off_track, on_track, t);
-                let track_border = lerp_color(
-                    palette.border_subtle,
-                    rgba(200, 255, 232, 175),
-                    t.max(hover_t * 0.4),
-                );
-
-                p.rect_filled(rect, track_cr, track_fill);
-                p.rect_stroke(
-                    rect,
-                    track_cr,
-                    Stroke::new(1.0_f32, track_border),
-                    StrokeKind::Inside,
-                );
-
-                let pad = 2.5_f32;
-                let base_d = rect.height() - pad * 2.0;
-                let thumb_w = base_d + motion_stretch;
-                let min_x = rect.left() + pad;
-                let max_x = rect.right() - pad - thumb_w;
-                let thumb_x = min_x + (max_x - min_x) * t;
-                let thumb_rect = Rect::from_min_size(
-                    Pos2::new(thumb_x, rect.top() + pad),
-                    Vec2::new(thumb_w, base_d),
-                );
-                let thumb_cr = CornerRadius::same((base_d * 0.5) as u8);
-
-                let thumb_shadow = Shadow {
-                    offset: [0, 2],
-                    blur: 8,
-                    spread: 0,
-                    color: rgba(0, 0, 0, 72),
-                };
-                p.add(thumb_shadow.as_shape(thumb_rect, thumb_cr));
-
-                p.rect_filled(thumb_rect, thumb_cr, rgba(255, 255, 255, 240));
-                p.rect_stroke(
-                    thumb_rect,
-                    thumb_cr,
-                    Stroke::new(1.0_f32, Color32::WHITE),
-                    StrokeKind::Inside,
-                );
-            }
-
-            if !label.is_empty() {
-                let lbl_resp = ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(label)
-                            .size(13.0)
-                            .color(palette.text_primary),
-                    )
-                    .sense(Sense::click()),
-                );
-                if lbl_resp.clicked() {
-                    *on = !*on;
-                    changed = true;
-                }
-            }
-
-            switch_resp
-        })
-        .inner;
-
-    if changed {
-        ui.ctx().request_repaint();
-    }
-    resp
+/// Sharp 1px rectangular tag badge.
+pub fn term_badge(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) {
+    term_badge_bordered(ui, text, fg, bg, fg);
 }
 
-/// Full-width sidebar capsule button with smooth animated hover/selection transitions,
-/// painted vector icon, and optional count badge.
-pub fn nav_pill(
+/// Sharp 1px rectangular tag badge with explicit border color (atomic, never wraps vertically).
+pub fn term_badge_bordered(
+    ui: &mut egui::Ui,
+    text: &str,
+    fg: Color32,
+    bg: Color32,
+    border: Color32,
+) {
+    let font_id = egui::FontId::monospace(11.0);
+    let measure = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font_id.clone(), fg);
+    let desired = Vec2::new(measure.size().x + 12.0, (measure.size().y + 4.0).max(19.0));
+    let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if bg.a() > 0 {
+            p.rect_filled(rect, CornerRadius::ZERO, bg);
+        }
+        p.rect_stroke(
+            rect,
+            CornerRadius::ZERO,
+            Stroke::new(1.0_f32, border),
+            StrokeKind::Inside,
+        );
+        let galley = p.layout_no_wrap(text.to_string(), font_id, fg);
+        p.galley(
+            Pos2::new(
+                rect.center().x - galley.size().x * 0.5,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            fg,
+        );
+    }
+}
+
+/// Full-width vertical filter rail option row with single-line truncated monospace text.
+pub fn term_rail_option(
     ui: &mut egui::Ui,
     palette: &Palette,
-    icon: NavIcon,
+    prefix: &str,
     label: &str,
-    badge_count: Option<usize>,
-    selected: bool,
+    active: bool,
+    accent: Color32,
 ) -> Response {
-    let desired = Vec2::new(ui.available_width(), 38.0);
+    let desired = Vec2::new(ui.available_width().max(60.0), 22.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
     if ui.is_rect_visible(rect) {
-        let sel_t = ui
-            .ctx()
-            .animate_bool_with_time(resp.id.with("sel"), selected, 0.20);
-        let hov_t = ui
-            .ctx()
-            .animate_bool_with_time(resp.id.with("hov"), resp.hovered() && !selected, 0.14);
-
-        let cr = CornerRadius::same(14);
         let p = ui.painter();
-
-        if sel_t > 0.01 {
-            let active_fill = match palette.mode {
-                GlassMode::Dark => rgba(255, 255, 255, (42.0 * sel_t) as u8),
-                GlassMode::Light => rgba(255, 255, 255, (232.0 * sel_t) as u8),
-            };
-            let shadow = Shadow {
-                offset: [0, 3],
-                blur: 10,
-                spread: 0,
-                color: rgba(
-                    palette.shadow_color.r(),
-                    palette.shadow_color.g(),
-                    palette.shadow_color.b(),
-                    (palette.shadow_color.a() as f32 * sel_t) as u8,
-                ),
-            };
-            p.add(shadow.as_shape(rect, cr));
-            p.rect_filled(rect, cr, active_fill);
-            p.rect_stroke(
-                rect,
-                cr,
-                Stroke::new(
-                    1.0_f32,
-                    lerp_color(Color32::TRANSPARENT, palette.border_bright, sel_t),
-                ),
-                StrokeKind::Inside,
-            );
-            p.line_segment(
-                [
-                    Pos2::new(rect.left() + 14.0, rect.top() + 1.0),
-                    Pos2::new(rect.right() - 14.0, rect.top() + 1.0),
-                ],
-                Stroke::new(
-                    1.0_f32,
-                    lerp_color(Color32::TRANSPARENT, palette.specular_top, sel_t),
-                ),
-            );
-        }
-
-        if hov_t > 0.01 {
+        if active {
             p.rect_filled(
                 rect,
-                cr,
-                lerp_color(Color32::TRANSPARENT, palette.control_fill, hov_t),
+                CornerRadius::ZERO,
+                rgba(accent.r(), accent.g(), accent.b(), 22),
             );
-            p.rect_stroke(
-                rect,
-                cr,
-                Stroke::new(
-                    1.0_f32,
-                    lerp_color(Color32::TRANSPARENT, palette.border_subtle, hov_t),
-                ),
-                StrokeKind::Inside,
-            );
+        } else if resp.hovered() {
+            p.rect_filled(rect, CornerRadius::ZERO, palette.raised);
         }
 
-        let icon_color = lerp_color(
-            palette.text_muted,
-            palette.accent_primary,
-            sel_t.max(hov_t * 0.4),
-        );
-        let text_color = lerp_color(
-            palette.text_secondary,
-            palette.text_primary,
-            sel_t.max(hov_t * 0.6),
-        );
+        let col = if active {
+            accent
+        } else if resp.hovered() {
+            palette.ink
+        } else {
+            palette.ink_muted
+        };
 
-        let icon_center = Pos2::new(rect.left() + 20.0, rect.center().y);
-        paint_nav_icon(p, icon_center, icon, icon_color);
-
-        let galley = p.layout_no_wrap(
-            label.to_string(),
-            egui::FontId::proportional(13.5),
-            text_color,
+        let text = format!("{prefix} {label}");
+        let mut job = egui::text::LayoutJob::single_section(
+            text,
+            egui::TextFormat {
+                font_id: egui::FontId::monospace(11.5),
+                color: col,
+                ..Default::default()
+            },
         );
+        job.wrap = egui::text::TextWrapping::truncate_at_width((rect.width() - 8.0).max(20.0));
+        let galley = p.layout_job(job);
         p.galley(
-            Pos2::new(rect.left() + 36.0, rect.center().y - galley.size().y * 0.5),
+            Pos2::new(rect.left() + 4.0, rect.center().y - galley.size().y * 0.5),
             galley,
-            text_color,
+            col,
+        );
+    }
+
+    resp
+}
+
+/// Left sidebar navigation row with 2px hard left `palette.focus` bar and crisp pixel-art icon.
+#[allow(clippy::too_many_arguments)]
+pub fn term_nav_item(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    num: &str,
+    icon: NavIcon,
+    label: &str,
+    badge_text: Option<&str>,
+    badge_col: Color32,
+    selected: bool,
+) -> Response {
+    let desired = Vec2::new(ui.available_width(), 32.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let hovered = resp.hovered();
+
+        if selected {
+            p.rect_filled(rect, CornerRadius::ZERO, palette.focus_bg);
+            let bar = Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height()));
+            p.rect_filled(bar, CornerRadius::ZERO, palette.focus);
+        } else if hovered {
+            p.rect_filled(rect, CornerRadius::ZERO, palette.surface);
+        }
+
+        let num_col = if selected {
+            palette.focus
+        } else {
+            palette.ink_muted
+        };
+        let icon_col = if selected {
+            palette.focus
+        } else if hovered {
+            palette.ink
+        } else {
+            palette.ink_muted
+        };
+        let lbl_col = if selected || hovered {
+            palette.ink
+        } else {
+            palette.ink_dim
+        };
+
+        let num_galley = p.layout_no_wrap(num.to_string(), egui::FontId::monospace(11.5), num_col);
+        p.galley(
+            Pos2::new(rect.left() + 10.0, rect.center().y - num_galley.size().y * 0.5),
+            num_galley,
+            num_col,
         );
 
-        if let Some(count) = badge_count {
-            let count_str = count.to_string();
-            let badge_text_col = lerp_color(palette.text_muted, palette.accent_primary, sel_t);
-            let badge_galley = p.layout_no_wrap(
-                count_str,
-                egui::FontId::proportional(11.0),
-                badge_text_col,
-            );
-            let bw = (badge_galley.size().x + 14.0).max(24.0);
-            let bh = 20.0;
-            let brect = Rect::from_min_size(
-                Pos2::new(rect.right() - bw - 10.0, rect.center().y - bh * 0.5),
-                Vec2::new(bw, bh),
-            );
-            let badge_fill = lerp_color(
-                palette.well_fill,
-                rgba(
-                    palette.accent_primary.r(),
-                    palette.accent_primary.g(),
-                    palette.accent_primary.b(),
-                    40,
-                ),
-                sel_t,
-            );
-            p.rect_filled(brect, CornerRadius::same(10), badge_fill);
+        let icon_rect = Rect::from_center_size(
+            Pos2::new(rect.left() + 36.0, rect.center().y),
+            Vec2::splat(14.0),
+        );
+        paint_pixel_nav_icon(p, icon_rect, icon, icon_col);
+
+        let lbl_galley =
+            p.layout_no_wrap(label.to_string(), egui::FontId::monospace(12.0), lbl_col);
+        p.galley(
+            Pos2::new(rect.left() + 50.0, rect.center().y - lbl_galley.size().y * 0.5),
+            lbl_galley,
+            lbl_col,
+        );
+
+        if let Some(badge) = badge_text.filter(|b| !b.is_empty()) {
+            let b_col = if selected { badge_col } else { palette.ink_muted };
+            let b_galley =
+                p.layout_no_wrap(badge.to_string(), egui::FontId::monospace(11.0), b_col);
             p.galley(
                 Pos2::new(
-                    brect.center().x - badge_galley.size().x * 0.5,
-                    brect.center().y - badge_galley.size().y * 0.5,
+                    rect.right() - b_galley.size().x - 10.0,
+                    rect.center().y - b_galley.size().y * 0.5,
                 ),
-                badge_galley,
-                badge_text_col,
+                b_galley,
+                b_col,
             );
         }
     }
@@ -1367,126 +882,49 @@ pub fn nav_pill(
     resp
 }
 
-/// Apple Liquid Glass segmented control with a smoothly gliding clear-glass pill thumb.
-pub fn segmented_control<T: Copy + PartialEq>(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    id_salt: &str,
-    current: &mut T,
-    options: &[(T, &str)],
-) -> bool {
-    let mut changed = false;
-    let ctrl_id = ui.make_persistent_id(id_salt);
+/// Terminal tab button with hard 2px bottom `palette.focus` bar when active.
+pub fn term_tab(ui: &mut egui::Ui, palette: &Palette, label: &str, active: bool) -> Response {
+    let font_id = egui::FontId::monospace(12.0);
+    let measure = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font_id.clone(), palette.ink);
+    let desired = Vec2::new(measure.size().x + 8.0, 26.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
-    glass_box(
-        ui,
-        palette,
-        GlassElevation::Well,
-        16,
-        Margin::same(3),
-        |ui| {
-            let thumb_slot = ui.painter().add(Shape::Noop);
-            let mut seg_rects: Vec<Rect> = Vec::with_capacity(options.len());
-            let mut active_idx = 0usize;
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let col = if active {
+            palette.focus
+        } else if resp.hovered() {
+            palette.ink
+        } else {
+            palette.ink_muted
+        };
+        let galley = p.layout_no_wrap(label.to_string(), font_id, col);
+        p.galley(
+            Pos2::new(rect.left() + 4.0, rect.top() + 3.0),
+            galley,
+            col,
+        );
+        if active {
+            let bar = Rect::from_min_max(
+                Pos2::new(rect.left(), rect.bottom() - 2.0),
+                Pos2::new(rect.right(), rect.bottom()),
+            );
+            p.rect_filled(bar, CornerRadius::ZERO, palette.focus);
+        }
+    }
 
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for (idx, &(value, label)) in options.iter().enumerate() {
-                    let selected = *current == value;
-                    if selected {
-                        active_idx = idx;
-                    }
-                    let text_col = if selected {
-                        palette.text_primary
-                    } else {
-                        palette.text_muted
-                    };
-                    let galley = ui.painter().layout_no_wrap(
-                        label.to_string(),
-                        egui::FontId::proportional(12.5),
-                        text_col,
-                    );
-                    let size = Vec2::new(galley.size().x + 22.0, 26.0);
-                    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-                    seg_rects.push(rect);
-
-                    if ui.is_rect_visible(rect) {
-                        let p = ui.painter();
-                        if !selected && resp.hovered() {
-                            p.rect_filled(rect, CornerRadius::same(13), palette.control_fill);
-                        }
-                        p.galley(
-                            Pos2::new(
-                                rect.center().x - galley.size().x * 0.5,
-                                rect.center().y - galley.size().y * 0.5,
-                            ),
-                            galley,
-                            text_col,
-                        );
-                    }
-                    if resp.clicked() && !selected {
-                        *current = value;
-                        active_idx = idx;
-                        changed = true;
-                    }
-                }
-            });
-
-            if let Some(target_rect) = seg_rects.get(active_idx) {
-                let base_x = seg_rects[0].left();
-                let target_rel_x = target_rect.left() - base_x;
-                let target_w = target_rect.width();
-
-                let anim_x = ui
-                    .ctx()
-                    .animate_value_with_time(ctrl_id.with("x"), target_rel_x, 0.22);
-                let anim_w = ui
-                    .ctx()
-                    .animate_value_with_time(ctrl_id.with("w"), target_w, 0.22);
-
-                let velocity_stretch = ((target_rel_x - anim_x).abs() * 0.08).min(6.0);
-                let thumb_rect = Rect::from_min_size(
-                    Pos2::new(base_x + anim_x - velocity_stretch * 0.5, target_rect.top()),
-                    Vec2::new(anim_w + velocity_stretch, target_rect.height()),
-                );
-                let cr = CornerRadius::same(13);
-
-                let shadow = Shadow {
-                    offset: [0, 2],
-                    blur: 8,
-                    spread: 0,
-                    color: palette.shadow_color,
-                };
-                let pad = thumb_rect.height() * 0.45;
-                let thumb_shapes = vec![
-                    Shape::Rect(shadow.as_shape(thumb_rect, cr)),
-                    Shape::rect_filled(thumb_rect, cr, palette.segment_thumb_fill),
-                    Shape::rect_stroke(
-                        thumb_rect,
-                        cr,
-                        Stroke::new(1.0_f32, palette.segment_thumb_border),
-                        StrokeKind::Inside,
-                    ),
-                    Shape::line_segment(
-                        [
-                            Pos2::new(thumb_rect.left() + pad, thumb_rect.top() + 1.0),
-                            Pos2::new(thumb_rect.right() - pad, thumb_rect.top() + 1.0),
-                        ],
-                        Stroke::new(1.0_f32, palette.specular_top),
-                    ),
-                ];
-                ui.painter().set(thumb_slot, Shape::Vec(thumb_shapes));
-            }
-        },
-    );
-    changed
+    resp
 }
 
-/// Recessed frosted capsule search field with painted magnifying glass and inline clear button.
-pub fn glass_search_bar(
+/// Terminal command/search input with `>` or `/` prompt in `palette.focus` and inline `[×]` clear button.
+/// Returns `(text_edit_response, cleared, enter_pressed)`.
+pub fn term_search_bar(
     ui: &mut egui::Ui,
     palette: &Palette,
     query: &mut String,
+    prompt: &str,
     hint: &str,
     width: f32,
 ) -> (Response, bool, bool) {
@@ -1494,23 +932,29 @@ pub fn glass_search_bar(
     let mut enter_pressed = false;
     let mut edit_resp: Option<Response> = None;
 
-    glass_box(
-        ui,
-        palette,
-        GlassElevation::Well,
-        16,
-        Margin::symmetric(10, 4),
-        |ui| {
-            ui.set_width((width - 20.0).max(120.0));
-            ui.horizontal(|ui| {
-                let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(16.0, 20.0), Sense::hover());
-                paint_search_icon(ui.painter(), icon_rect.center(), palette.text_muted);
+    let inner_w = (width - 16.0).max(100.0);
+    let frame_idx = ui.painter().add(Shape::Noop);
+    let inner = egui::Frame::NONE
+        .inner_margin(Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.set_width(inner_w);
+            ui.set_max_width(inner_w);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    egui::RichText::new(prompt)
+                        .monospace()
+                        .size(12.0)
+                        .strong()
+                        .color(palette.focus),
+                );
 
-                let text_w =
-                    (ui.available_width() - if query.is_empty() { 4.0 } else { 24.0 }).max(80.0);
+                let clear_w = if query.is_empty() { 0.0 } else { 26.0 };
+                let text_w = (inner_w - 20.0 - clear_w).max(60.0);
                 let resp = ui.add(
                     egui::TextEdit::singleline(query)
                         .hint_text(hint)
+                        .font(egui::FontId::monospace(12.0))
                         .frame(false)
                         .desired_width(text_w),
                 );
@@ -1521,24 +965,25 @@ pub fn glass_search_bar(
 
                 if !query.is_empty() {
                     let (x_rect, x_resp) =
-                        ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::click());
+                        ui.allocate_exact_size(Vec2::new(22.0, 18.0), Sense::click());
                     if ui.is_rect_visible(x_rect) {
-                        let c = x_rect.center();
-                        let bg = if x_resp.hovered() {
-                            palette.control_hover
+                        let col = if x_resp.hovered() {
+                            palette.danger
                         } else {
-                            palette.control_fill
+                            palette.ink_muted
                         };
-                        ui.painter().circle_filled(c, 8.0, bg);
-                        let s = 3.2;
-                        let stroke = Stroke::new(1.3_f32, palette.text_secondary);
-                        ui.painter().line_segment(
-                            [Pos2::new(c.x - s, c.y - s), Pos2::new(c.x + s, c.y + s)],
-                            stroke,
+                        let g = ui.painter().layout_no_wrap(
+                            "[×]".to_string(),
+                            egui::FontId::monospace(11.0),
+                            col,
                         );
-                        ui.painter().line_segment(
-                            [Pos2::new(c.x + s, c.y - s), Pos2::new(c.x - s, c.y + s)],
-                            stroke,
+                        ui.painter().galley(
+                            Pos2::new(
+                                x_rect.center().x - g.size().x * 0.5,
+                                x_rect.center().y - g.size().y * 0.5,
+                            ),
+                            g,
+                            col,
                         );
                     }
                     if x_resp.clicked() {
@@ -1547,284 +992,246 @@ pub fn glass_search_bar(
                     }
                 }
             });
-        },
+        });
+
+    let resp = edit_resp.expect("search text edit rendered");
+    let border = if resp.has_focus() {
+        palette.focus
+    } else {
+        palette.border_hi
+    };
+    let rect = inner.response.rect;
+    ui.painter().set(
+        frame_idx,
+        Shape::Vec(vec![
+            Shape::rect_filled(rect, CornerRadius::ZERO, palette.bg),
+            Shape::rect_stroke(
+                rect,
+                CornerRadius::ZERO,
+                Stroke::new(1.0_f32, border),
+                StrokeKind::Inside,
+            ),
+        ]),
     );
 
-    (
-        edit_resp.expect("search text edit rendered"),
-        cleared,
-        enter_pressed,
-    )
+    (resp, cleared, enter_pressed)
 }
 
-/// Frosted capsule pill badge with subtle refractive border.
-pub fn pill_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
-    let bg = rgba(color.r(), color.g(), color.b(), 32);
-    let stroke = Stroke::new(1.0_f32, rgba(color.r(), color.g(), color.b(), 105));
-    egui::Frame::new()
-        .fill(bg)
-        .stroke(stroke)
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::symmetric(9, 2))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(10.5).strong().color(color));
-        });
-}
+/// Crisp terminal checkbox toggle `[×] label` / `[ ] label`.
+pub fn term_toggle(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    on: &mut bool,
+    label: &str,
+    accent: Color32,
+) -> Response {
+    let text = if label.is_empty() {
+        if *on { "[×]".to_string() } else { "[ ]".to_string() }
+    } else if *on {
+        format!("[×] {label}")
+    } else {
+        format!("[ ] {label}")
+    };
 
-/// Frosted status pill with a glowing live indicator dot.
-pub fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32, glowing: bool) {
-    let bg = rgba(color.r(), color.g(), color.b(), 28);
-    let stroke = Stroke::new(1.0_f32, rgba(color.r(), color.g(), color.b(), 95));
-    egui::Frame::new()
-        .fill(bg)
-        .stroke(stroke)
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::symmetric(9, 2))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 5.0;
-                status_dot(ui, color, glowing);
-                ui.label(egui::RichText::new(text).size(11.0).strong().color(color));
-            });
-        });
-}
+    let font_id = egui::FontId::monospace(12.0);
+    let fg = if *on { accent } else { palette.ink_dim };
+    let measure = ui.painter().layout_no_wrap(text.clone(), font_id.clone(), fg);
+    let desired = Vec2::new(measure.size().x + 14.0, 24.0);
+    let (rect, mut resp) = ui.allocate_exact_size(desired, Sense::click());
 
-/// Painted status dot with optional soft ambient halo.
-pub fn status_dot(ui: &mut egui::Ui, color: Color32, glowing: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), Sense::hover());
-    let c = rect.center();
-    if glowing {
-        ui.painter()
-            .circle_filled(c, 5.5, rgba(color.r(), color.g(), color.b(), 58));
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
     }
-    ui.painter().circle_filled(c, 3.4, color);
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let bg = if *on {
+            rgba(accent.r(), accent.g(), accent.b(), 28)
+        } else if resp.hovered() {
+            palette.surface
+        } else {
+            Color32::TRANSPARENT
+        };
+        let border = if *on {
+            accent
+        } else if resp.hovered() {
+            palette.border_hi
+        } else {
+            palette.border
+        };
+        let draw_fg = if *on {
+            accent
+        } else if resp.hovered() {
+            palette.ink
+        } else {
+            palette.ink_muted
+        };
+
+        if bg.a() > 0 {
+            p.rect_filled(rect, CornerRadius::ZERO, bg);
+        }
+        p.rect_stroke(
+            rect,
+            CornerRadius::ZERO,
+            Stroke::new(1.0_f32, border),
+            StrokeKind::Inside,
+        );
+
+        let draw_text = if label.is_empty() {
+            if *on { "[×]".to_string() } else { "[ ]".to_string() }
+        } else if *on {
+            format!("[×] {label}")
+        } else {
+            format!("[ ] {label}")
+        };
+        let galley = p.layout_no_wrap(draw_text, font_id, draw_fg);
+        p.galley(
+            Pos2::new(rect.left() + 7.0, rect.center().y - galley.size().y * 0.5),
+            galley,
+            draw_fg,
+        );
+    }
+
+    resp
 }
 
-/// Hairline glass divider.
-pub fn glass_divider(ui: &mut egui::Ui, palette: &Palette) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, palette.divider);
-    ui.add_space(4.0);
+/// 8-segment discrete pixel RAM meter: Player in `palette.player`, Bot in `palette.bot`, free in `palette.border`.
+pub fn term_pixel_ram_bar(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    player_frac: f32,
+    bot_frac: f32,
+    width: f32,
+) {
+    const SEGMENTS: usize = 8;
+    let gap = 2.0_f32;
+    let height = 8.0_f32;
+    let total_w = width.max(40.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(total_w, height), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+
+    let p_blocks = ((player_frac.clamp(0.0, 1.0) * SEGMENTS as f32).round() as usize).min(SEGMENTS);
+    let b_blocks = ((bot_frac.clamp(0.0, 1.0) * SEGMENTS as f32).round() as usize)
+        .min(SEGMENTS.saturating_sub(p_blocks));
+
+    let seg_w = ((total_w - gap * (SEGMENTS as f32 - 1.0)) / SEGMENTS as f32).max(2.0);
+    let painter = ui.painter();
+    for i in 0..SEGMENTS {
+        let x0 = rect.left() + i as f32 * (seg_w + gap);
+        let seg_rect = Rect::from_min_size(Pos2::new(x0, rect.top()), Vec2::new(seg_w, height));
+        let col = if i < p_blocks {
+            palette.player
+        } else if i < p_blocks + b_blocks {
+            palette.bot
+        } else {
+            palette.border
+        };
+        painter.rect_filled(seg_rect, CornerRadius::ZERO, col);
+    }
 }
 
-/// Uppercase tracked micro-header (Apple HIG section label).
-pub fn section_eyebrow(ui: &mut egui::Ui, palette: &Palette, text: &str) {
-    ui.label(
-        egui::RichText::new(text.to_uppercase())
-            .size(10.5)
-            .strong()
-            .color(palette.text_muted),
-    );
+/// 10-segment discrete pixel progress bar (`[████████░░]`).
+pub fn term_progress_bar(ui: &mut egui::Ui, palette: &Palette, frac: f32, width: f32) {
+    const SEGMENTS: usize = 10;
+    let gap = 2.0_f32;
+    let height = 8.0_f32;
+    let total_w = width.max(50.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(total_w, height), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+
+    let filled = ((frac.clamp(0.0, 1.0) * SEGMENTS as f32).round() as usize).min(SEGMENTS);
+    let active_col = if frac >= 1.0 { palette.mr } else { palette.focus };
+    let seg_w = ((total_w - gap * (SEGMENTS as f32 - 1.0)) / SEGMENTS as f32).max(2.0);
+    let painter = ui.painter();
+    for i in 0..SEGMENTS {
+        let x0 = rect.left() + i as f32 * (seg_w + gap);
+        let seg_rect = Rect::from_min_size(Pos2::new(x0, rect.top()), Vec2::new(seg_w, height));
+        let col = if i < filled { active_col } else { palette.border };
+        painter.rect_filled(seg_rect, CornerRadius::ZERO, col);
+    }
 }
 
-/// Bespoke **ModsUndBots** logo: an Apple Liquid Glass squircle housing a faceted
-/// Emerald-Prism Minecraft Cube with glowing twin Bot Visor eyes and a floating
-/// overhead Mod-Spark node.
-pub fn paint_app_emblem(ui: &mut egui::Ui, palette: &Palette, size: f32) {
+/// Multi-color 10x10 pixel emblem: focus top/left corner frame, warm-sand crown,
+/// surface body, cyan left eye + orchid right eye.
+pub fn paint_pixel_emblem(ui: &mut egui::Ui, palette: &Palette, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
     }
+
     let p = ui.painter();
-    let cr = CornerRadius::same((size * 0.28) as u8);
-    let (_, orb_a, orb_b) = palette.preset.swatch_colors();
-
-    // Soft luminous drop glow
-    let glow = Shadow {
-        offset: [0, 4],
-        blur: 16,
-        spread: 0,
-        color: rgba(orb_a.r(), orb_a.g(), orb_a.b(), 95),
+    let cell = size / 10.0;
+    let px = |gx: u8, gy: u8, gw: u8, gh: u8, col: Color32| {
+        let r = Rect::from_min_max(
+            Pos2::new(rect.left() + gx as f32 * cell, rect.top() + gy as f32 * cell),
+            Pos2::new(
+                rect.left() + (gx + gw) as f32 * cell,
+                rect.top() + (gy + gh) as f32 * cell,
+            ),
+        );
+        p.rect_filled(r, CornerRadius::ZERO, col);
     };
-    p.add(glow.as_shape(rect, cr));
 
-    // Deep obsidian-glass squircle base
-    p.rect_filled(rect, cr, Color32::from_rgb(10, 24, 30));
-
-    // Dual caustic orbs inside squircle
-    p.circle_filled(
-        Pos2::new(rect.left() + size * 0.26, rect.top() + size * 0.24),
-        size * 0.36,
-        rgba(orb_a.r(), orb_a.g(), orb_a.b(), 155),
-    );
-    p.circle_filled(
-        Pos2::new(rect.right() - size * 0.22, rect.bottom() - size * 0.22),
-        size * 0.34,
-        rgba(orb_b.r(), orb_b.g(), orb_b.b(), 145),
-    );
-
-    // Specular glass perimeter + top rim catchlight
-    p.rect_stroke(
-        rect,
-        cr,
-        Stroke::new(1.1_f32, rgba(255, 255, 255, 175)),
-        StrokeKind::Inside,
-    );
-    p.line_segment(
-        [
-            Pos2::new(rect.left() + size * 0.28, rect.top() + 1.0),
-            Pos2::new(rect.right() - size * 0.28, rect.top() + 1.0),
-        ],
-        Stroke::new(1.1_f32, rgba(255, 255, 255, 220)),
-    );
-
-    // Isometric 3-Faceted Crystal Cube (shifted slightly down to leave room for mod-spark)
-    let c = Pos2::new(rect.center().x, rect.center().y + size * 0.05);
-    let r = size * 0.27;
-    let dx = r * 0.88;
-    let dy = r * 0.46;
-
-    let top = Pos2::new(c.x, c.y - r);
-    let tr = Pos2::new(c.x + dx, c.y - dy);
-    let br = Pos2::new(c.x + dx, c.y + dy);
-    let bot = Pos2::new(c.x, c.y + r);
-    let bl = Pos2::new(c.x - dx, c.y + dy);
-    let tl = Pos2::new(c.x - dx, c.y - dy);
-
-    // Top crystal facet (brightest frosted mint-white)
-    p.add(Shape::convex_polygon(
-        vec![top, tr, c, tl],
-        rgba(230, 255, 248, 220),
-        Stroke::NONE,
-    ));
-    // Left facet (frosted luminous emerald/accent)
-    p.add(Shape::convex_polygon(
-        vec![tl, c, bot, bl],
-        rgba(orb_a.r(), orb_a.g(), orb_a.b(), 205),
-        Stroke::NONE,
-    ));
-    // Right facet (deep dark obsidian visor face for Bot Eyes)
-    p.add(Shape::convex_polygon(
-        vec![c, tr, br, bot],
-        rgba(10, 22, 30, 228),
-        Stroke::NONE,
-    ));
-
-    // Crisp prism wireframe highlight
-    let edge = Stroke::new(1.15_f32, rgba(255, 255, 255, 210));
-    p.add(Shape::closed_line(vec![top, tr, br, bot, bl, tl], edge));
-    p.line_segment([tl, c], edge);
-    p.line_segment([tr, c], edge);
-    p.line_segment([c, bot], edge);
-
-    // Twin glowing Bot Visor Eyes on the right facet
-    let eye_col = Color32::from_rgb(138, 255, 240);
-    let eye_r = (size * 0.042).max(1.5);
-    let eye1 = Pos2::new(c.x + dx * 0.34, c.y + dy * 0.28);
-    let eye2 = Pos2::new(c.x + dx * 0.72, c.y + dy * 0.06);
-    p.circle_filled(eye1, eye_r * 1.6, rgba(eye_col.r(), eye_col.g(), eye_col.b(), 80));
-    p.circle_filled(eye2, eye_r * 1.6, rgba(eye_col.r(), eye_col.g(), eye_col.b(), 80));
-    p.circle_filled(eye1, eye_r, eye_col);
-    p.circle_filled(eye2, eye_r, eye_col);
-
-    // Floating Mod-Spark diamond hovering above the cube crown
-    let spark_c = Pos2::new(c.x, top.y - size * 0.11);
-    let sr = size * 0.065;
-    p.add(Shape::convex_polygon(
-        vec![
-            Pos2::new(spark_c.x, spark_c.y - sr),
-            Pos2::new(spark_c.x + sr * 0.85, spark_c.y),
-            Pos2::new(spark_c.x, spark_c.y + sr),
-            Pos2::new(spark_c.x - sr * 0.85, spark_c.y),
-        ],
-        Color32::WHITE,
-        Stroke::NONE,
-    ));
+    // Background
+    p.rect_filled(rect, CornerRadius::ZERO, palette.bg);
+    // Outer frame (top/left focus, bottom/right border_hi)
+    px(0, 0, 10, 1, palette.focus);
+    px(0, 0, 1, 10, palette.focus);
+    px(0, 9, 10, 1, palette.border_hi);
+    px(9, 0, 1, 10, palette.border_hi);
+    // Warm sand crown + surface cube body
+    px(2, 2, 6, 2, palette.meta);
+    px(2, 4, 6, 4, palette.surface);
+    // Twin dual-tone eyes: Cyan (Player) + Orchid (Bot) + muted mouth bar
+    px(3, 5, 1, 1, palette.player);
+    px(6, 5, 1, 1, palette.bot);
+    px(3, 7, 4, 1, palette.ink_muted);
 }
 
-/// Builds a crisp 64x64 RGBA OS window & taskbar icon matching the ModsUndBots
-/// Emerald-Prism Liquid Glass squircle logo.
+/// Crisp 64x64 pixel-art window/taskbar icon matching the multi-color pixel emblem.
 pub fn build_window_icon() -> IconData {
     const N: usize = 64;
+    let p = Palette::for_preset(ThemePreset::SynthTerminal);
     let mut rgba_buf = vec![0u8; N * N * 4];
 
-    let half = (N as f32) * 0.5;
-    let radius = 16.0_f32;
-    let box_half = half - 2.0;
-
+    // Map 10x10 pixel grid cleanly into 60x60 centered inside 64x64 with a 2px outer bg margin
     for y in 0..N {
         for x in 0..N {
-            let fx = (x as f32 + 0.5) - half;
-            let fy = (y as f32 + 0.5) - half;
+            let color = if !(2..62).contains(&x) || !(2..62).contains(&y) {
+                p.bg
+            } else {
+                let gx = (x - 2) / 6; // 0..10
+                let gy = (y - 2) / 6; // 0..10
 
-            // Signed distance to rounded squircle
-            let qx = fx.abs() - (box_half - radius);
-            let qy = fy.abs() - (box_half - radius);
-            let sdf = (qx.max(0.0).hypot(qy.max(0.0))) + qx.max(qy).min(0.0) - radius;
-            let cov = (0.75 - sdf).clamp(0.0, 1.0);
-            if cov <= 0.0 {
-                continue;
-            }
-
-            // Normalized [0, 1] coords
-            let u = (x as f32 + 0.5) / N as f32;
-            let v = (y as f32 + 0.5) / N as f32;
-
-            // Base obsidian-teal-emerald gradient
-            let mut r = 10.0 + (1.0 - u) * 18.0 + (1.0 - v) * 16.0;
-            let mut g = 28.0 + (1.0 - u) * 110.0 + (1.0 - v) * 48.0;
-            let mut b = 40.0 + u * 118.0 + (1.0 - v) * 36.0;
-
-            // Specular rim near squircle edge
-            if sdf > -1.8 {
-                let rim = ((sdf + 1.8) / 1.8).clamp(0.0, 1.0);
-                r += rim * 120.0;
-                g += rim * 145.0;
-                b += rim * 138.0;
-            }
-
-            // Isometric cube centered slightly below middle
-            let cx = fx;
-            let cy = fy - 2.5;
-            let s = 17.5_f32;
-            // Hexagonal projection coordinates
-            let in_hex = cx.abs() <= s * 0.88
-                && (cy + cx * 0.52).abs() <= s
-                && (cy - cx * 0.52).abs() <= s;
-
-            if in_hex {
-                if cy < -cx.abs() * 0.52 {
-                    // Top crystal facet
-                    r = 215.0;
-                    g = 252.0;
-                    b = 242.0;
-                } else if cx < 0.0 {
-                    // Left emerald prism facet
-                    r = 34.0;
-                    g = 216.0;
-                    b = 150.0;
+                if gy == 9 || gx == 9 {
+                    p.border_hi
+                } else if gy == 0 || gx == 0 {
+                    p.focus
+                } else if (2..8).contains(&gx) && (2..4).contains(&gy) {
+                    p.meta
+                } else if gx == 3 && gy == 5 {
+                    p.player
+                } else if gx == 6 && gy == 5 {
+                    p.bot
+                } else if (3..7).contains(&gx) && gy == 7 {
+                    p.ink_muted
+                } else if (2..8).contains(&gx) && (4..8).contains(&gy) {
+                    p.surface
                 } else {
-                    // Right dark bot visor facet
-                    r = 12.0;
-                    g = 26.0;
-                    b = 34.0;
-
-                    // Twin glowing bot visor eyes
-                    let d1 = (cx - 5.4).hypot(cy - 2.8);
-                    let d2 = (cx - 11.4).hypot(cy - 0.2);
-                    let eye = ((2.4 - d1).max(2.4 - d2)).clamp(0.0, 1.0);
-                    if eye > 0.0 {
-                        r = r * (1.0 - eye) + 140.0 * eye;
-                        g = g * (1.0 - eye) + 255.0 * eye;
-                        b = b * (1.0 - eye) + 242.0 * eye;
-                    }
+                    p.bg
                 }
-            }
-
-            // Floating mod-spark diamond above cube
-            let spark_d = fx.abs() + (fy + 22.0).abs();
-            if spark_d < 3.6 {
-                let sp = (3.6 - spark_d).clamp(0.0, 1.0);
-                r = r * (1.0 - sp) + 255.0 * sp;
-                g = g * (1.0 - sp) + 255.0 * sp;
-                b = b * (1.0 - sp) + 255.0 * sp;
-            }
+            };
 
             let idx = (y * N + x) * 4;
-            rgba_buf[idx] = r.clamp(0.0, 255.0) as u8;
-            rgba_buf[idx + 1] = g.clamp(0.0, 255.0) as u8;
-            rgba_buf[idx + 2] = b.clamp(0.0, 255.0) as u8;
-            rgba_buf[idx + 3] = (cov * 255.0) as u8;
+            rgba_buf[idx] = color.r();
+            rgba_buf[idx + 1] = color.g();
+            rgba_buf[idx + 2] = color.b();
+            rgba_buf[idx + 3] = 255;
         }
     }
 
@@ -1835,62 +1242,37 @@ pub fn build_window_icon() -> IconData {
     }
 }
 
-/// Paints a circular frosted avatar emblem with initial(s) for profiles & accounts.
-pub fn paint_avatar_badge(ui: &mut egui::Ui, label: &str, accent: Color32, size: f32) {
+/// Square 0px-radius avatar tile with 1px border and 2-char uppercase initials.
+pub fn paint_avatar_tile(
+    ui: &mut egui::Ui,
+    label: &str,
+    fg: Color32,
+    bg: Color32,
+    size: f32,
+) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
     }
     let p = ui.painter();
-    let c = rect.center();
-    let r = size * 0.5;
-    p.circle_filled(c, r, rgba(accent.r(), accent.g(), accent.b(), 38));
-    p.circle_stroke(
-        c,
-        r - 0.5,
-        Stroke::new(1.0_f32, rgba(accent.r(), accent.g(), accent.b(), 120)),
-    );
-
-    let ch = label
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_ascii_uppercase()
-        .to_string();
-    let galley = p.layout_no_wrap(ch, egui::FontId::proportional(size * 0.44), accent);
-    p.galley(
-        Pos2::new(c.x - galley.size().x * 0.5, c.y - galley.size().y * 0.5),
-        galley,
-        accent,
-    );
-}
-
-/// Paints a fixed-size rounded frosted placeholder icon (guaranteed exact `size x size`).
-pub fn paint_icon_placeholder(ui: &mut egui::Ui, palette: &Palette, title: &str, size: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    let cr = CornerRadius::same(14);
-    let p = ui.painter();
-    p.rect_filled(rect, cr, palette.well_fill);
+    p.rect_filled(rect, CornerRadius::ZERO, bg);
     p.rect_stroke(
         rect,
-        cr,
-        Stroke::new(1.0_f32, palette.border_subtle),
+        CornerRadius::ZERO,
+        Stroke::new(1.0_f32, fg),
         StrokeKind::Inside,
     );
 
-    let initial = title
+    let initials: String = label
         .chars()
-        .next()
-        .unwrap_or('M')
-        .to_ascii_uppercase()
-        .to_string();
+        .take(2)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let text = if initials.is_empty() { "?" } else { &initials };
     let galley = p.layout_no_wrap(
-        initial,
-        egui::FontId::proportional(size * 0.42),
-        palette.accent_primary,
+        text.to_string(),
+        egui::FontId::monospace((size * 0.36).max(10.0)),
+        fg,
     );
     p.galley(
         Pos2::new(
@@ -1898,86 +1280,214 @@ pub fn paint_icon_placeholder(ui: &mut egui::Ui, palette: &Palette, title: &str,
             rect.center().y - galley.size().y * 0.5,
         ),
         galley,
-        palette.accent_primary,
+        fg,
     );
 }
 
-fn paint_search_icon(p: &egui::Painter, c: Pos2, color: Color32) {
-    let lens_c = Pos2::new(c.x - 1.5, c.y - 1.5);
-    let stroke = Stroke::new(1.4_f32, color);
-    p.circle_stroke(lens_c, 4.5, stroke);
-    p.line_segment(
-        [
-            Pos2::new(lens_c.x + 3.2, lens_c.y + 3.2),
-            Pos2::new(c.x + 5.5, c.y + 5.5),
-        ],
-        stroke,
+/// Square 0px-radius project/mod icon placeholder (`palette.bg` fill, `accent` border & initials).
+pub fn paint_icon_placeholder(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    title: &str,
+    accent: Color32,
+    size: f32,
+) {
+    paint_avatar_tile(ui, title, accent, palette.bg, size);
+}
+
+/// Theme preset swatch card: 6 pixel color blocks + preset name + subtitle + `[×]` mark.
+pub fn theme_swatch_card(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    preset: ThemePreset,
+    selected: bool,
+) -> Response {
+    let desired = Vec2::new(186.0, 74.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let border = if selected {
+            palette.focus
+        } else if resp.hovered() {
+            palette.ink_dim
+        } else {
+            palette.border_hi
+        };
+        let fill = if resp.hovered() && !selected {
+            palette.surface
+        } else {
+            palette.bg
+        };
+
+        p.rect_filled(rect, CornerRadius::ZERO, fill);
+        p.rect_stroke(
+            rect,
+            CornerRadius::ZERO,
+            Stroke::new(1.0_f32, border),
+            StrokeKind::Inside,
+        );
+
+        let colors = preset.swatch_colors();
+        let pad = 10.0;
+        let gap = 4.0;
+        let inner_w = rect.width() - pad * 2.0;
+        let small_w = 16.0;
+        let bg_w = (inner_w - small_w * 5.0 - gap * 5.0).max(16.0);
+        let block_h = 12.0;
+        let top_y = rect.top() + pad;
+
+        let mut x = rect.left() + pad;
+        for (i, &col) in colors.iter().enumerate() {
+            let w = if i == 0 { bg_w } else { small_w };
+            let r = Rect::from_min_size(Pos2::new(x, top_y), Vec2::new(w, block_h));
+            p.rect_filled(r, CornerRadius::ZERO, col);
+            if i == 0 {
+                p.rect_stroke(
+                    r,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0_f32, palette.border_hi),
+                    StrokeKind::Inside,
+                );
+            }
+            x += w + gap;
+        }
+
+        let name_galley = p.layout_no_wrap(
+            preset.name().to_string(),
+            egui::FontId::monospace(12.0),
+            palette.ink,
+        );
+        p.galley(
+            Pos2::new(rect.left() + pad, rect.top() + 30.0),
+            name_galley,
+            palette.ink,
+        );
+
+        if selected {
+            let mark_g = p.layout_no_wrap(
+                "[×]".to_string(),
+                egui::FontId::monospace(11.5),
+                palette.focus,
+            );
+            p.galley(
+                Pos2::new(rect.right() - pad - mark_g.size().x, rect.top() + 30.0),
+                mark_g,
+                palette.focus,
+            );
+        }
+
+        let sub_galley = p.layout_no_wrap(
+            preset.subtitle().to_string(),
+            egui::FontId::monospace(10.5),
+            palette.ink_muted,
+        );
+        p.galley(
+            Pos2::new(rect.left() + pad, rect.top() + 49.0),
+            sub_galley,
+            palette.ink_muted,
+        );
+    }
+
+    resp
+}
+
+/// Terminal section header: `── TITLE` in uppercase bold monospace.
+pub fn section_header(ui: &mut egui::Ui, _palette: &Palette, title: &str, accent: Color32) {
+    ui.label(
+        egui::RichText::new(format!("── {}", title.to_uppercase()))
+            .monospace()
+            .size(11.5)
+            .strong()
+            .color(accent),
     );
 }
 
-fn paint_nav_icon(p: &egui::Painter, c: Pos2, icon: NavIcon, color: Color32) {
-    let stroke = Stroke::new(1.5_f32, color);
+/// Crisp 1px horizontal terminal divider.
+pub fn term_divider(ui: &mut egui::Ui, palette: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::ZERO, palette.border);
+    ui.add_space(4.0);
+}
+
+fn paint_pixel_nav_icon(p: &egui::Painter, rect: Rect, icon: NavIcon, color: Color32) {
+    let cell = rect.width() / 10.0;
+    let px = |gx: u8, gy: u8, gw: u8, gh: u8| {
+        let r = Rect::from_min_max(
+            Pos2::new(rect.left() + gx as f32 * cell, rect.top() + gy as f32 * cell),
+            Pos2::new(
+                rect.left() + (gx + gw) as f32 * cell,
+                rect.top() + (gy + gh) as f32 * cell,
+            ),
+        );
+        p.rect_filled(r, CornerRadius::ZERO, color);
+    };
+
     match icon {
         NavIcon::Instances => {
-            let s = 4.5;
-            let gap = 1.6;
-            let offsets = [
-                (-s - gap * 0.5, -s - gap * 0.5),
-                (gap * 0.5, -s - gap * 0.5),
-                (-s - gap * 0.5, gap * 0.5),
-                (gap * 0.5, gap * 0.5),
-            ];
-            for (dx, dy) in offsets {
-                let r = Rect::from_min_size(Pos2::new(c.x + dx, c.y + dy), Vec2::splat(s));
-                p.rect_stroke(r, CornerRadius::same(1), stroke, StrokeKind::Middle);
-            }
+            px(1, 1, 3, 3);
+            px(6, 1, 3, 3);
+            px(1, 6, 3, 3);
+            px(6, 6, 3, 3);
         }
-        NavIcon::Mods => {
-            let r = 6.2;
-            let top = Pos2::new(c.x, c.y - r);
-            let right = Pos2::new(c.x + r * 0.88, c.y - r * 0.42);
-            let br = Pos2::new(c.x + r * 0.88, c.y + r * 0.42);
-            let bot = Pos2::new(c.x, c.y + r);
-            let bl = Pos2::new(c.x - r * 0.88, c.y + r * 0.42);
-            let left = Pos2::new(c.x - r * 0.88, c.y - r * 0.42);
-            p.add(Shape::closed_line(
-                vec![top, right, br, bot, bl, left],
-                stroke,
-            ));
-            p.line_segment([left, c], stroke);
-            p.line_segment([right, c], stroke);
-            p.line_segment([c, bot], stroke);
+        NavIcon::Discover => {
+            px(2, 1, 6, 1);
+            px(1, 2, 1, 6);
+            px(8, 2, 1, 6);
+            px(2, 8, 6, 1);
+            px(4, 3, 2, 4);
+            px(3, 4, 4, 2);
         }
         NavIcon::Accounts => {
-            p.circle_stroke(Pos2::new(c.x, c.y - 3.0), 3.0, stroke);
-            let shoulders = Rect::from_min_max(
-                Pos2::new(c.x - 5.5, c.y + 1.5),
-                Pos2::new(c.x + 5.5, c.y + 6.5),
-            );
-            p.rect_stroke(shoulders, CornerRadius::same(3), stroke, StrokeKind::Middle);
+            px(3, 1, 4, 4);
+            px(1, 6, 8, 3);
         }
-        NavIcon::Logs => {
-            let box_r = Rect::from_center_size(c, Vec2::new(13.0, 10.5));
-            p.rect_stroke(box_r, CornerRadius::same(2), stroke, StrokeKind::Middle);
-            p.line_segment(
-                [Pos2::new(c.x - 3.6, c.y - 2.0), Pos2::new(c.x - 1.2, c.y)],
-                stroke,
-            );
-            p.line_segment(
-                [Pos2::new(c.x - 1.2, c.y), Pos2::new(c.x - 3.6, c.y + 2.0)],
-                stroke,
-            );
-            p.line_segment(
-                [Pos2::new(c.x + 0.5, c.y + 2.0), Pos2::new(c.x + 3.8, c.y + 2.0)],
-                stroke,
-            );
+        NavIcon::Console => {
+            px(1, 1, 8, 1);
+            px(1, 8, 8, 1);
+            px(1, 1, 1, 8);
+            px(8, 1, 1, 8);
+            px(2, 3, 1, 1);
+            px(3, 4, 1, 1);
+            px(2, 5, 1, 1);
+            px(5, 6, 3, 1);
         }
-        NavIcon::Settings => {
-            for (dy, kx) in [(-3.8_f32, -2.0_f32), (0.0, 2.2), (3.8, -1.0)] {
-                let y = c.y + dy;
-                p.line_segment([Pos2::new(c.x - 6.0, y), Pos2::new(c.x + 6.0, y)], stroke);
-                p.circle_filled(Pos2::new(c.x + kx, y), 2.1, color);
-            }
+        NavIcon::Config => {
+            px(1, 2, 8, 1);
+            px(3, 1, 2, 3);
+            px(1, 5, 8, 1);
+            px(6, 4, 2, 3);
+            px(1, 8, 8, 1);
+            px(2, 7, 2, 2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_and_window_icon_are_valid() {
+        assert_eq!(ThemePreset::ALL.len(), 4);
+        for preset in ThemePreset::ALL {
+            assert_eq!(ThemePreset::from_id(preset.id()), preset);
+            let sw = preset.swatch_colors();
+            let pal = Palette::for_preset(preset);
+            assert_eq!(sw[0], pal.bg);
+            assert_eq!(sw[1], pal.focus);
+            assert_eq!(sw[2], pal.bot);
+            assert_eq!(sw[3], pal.player);
+            assert_eq!(sw[4], pal.mr);
+            assert_eq!(sw[5], pal.cf);
+        }
+        assert!(!ThemePreset::SynthTerminal.is_light());
+        assert!(ThemePreset::DraftingPaper.is_light());
+
+        let icon = build_window_icon();
+        assert_eq!(icon.width, 64);
+        assert_eq!(icon.height, 64);
+        assert_eq!(icon.rgba.len(), 64 * 64 * 4);
     }
 }

@@ -68,6 +68,15 @@ pub struct ModrinthHit {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModrinthLicense {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModrinthProject {
     pub id: String,
     pub slug: String,
@@ -75,6 +84,8 @@ pub struct ModrinthProject {
     pub description: String,
     #[serde(default)]
     pub body: String,
+    #[serde(default)]
+    pub project_type: String,
     pub downloads: u64,
     #[serde(default)]
     pub followers: u64,
@@ -87,6 +98,10 @@ pub struct ModrinthProject {
     pub source_url: Option<String>,
     pub wiki_url: Option<String>,
     pub issues_url: Option<String>,
+    #[serde(default)]
+    pub discord_url: Option<String>,
+    #[serde(default)]
+    pub license: Option<ModrinthLicense>,
     #[serde(default)]
     pub client_side: String,
     #[serde(default)]
@@ -112,6 +127,10 @@ pub struct ModrinthVersion {
     pub version_type: String,
     #[serde(default)]
     pub date_published: String,
+    #[serde(default)]
+    pub downloads: u64,
+    #[serde(default)]
+    pub changelog: Option<String>,
     #[serde(default)]
     pub game_versions: Vec<String>,
     #[serde(default)]
@@ -150,6 +169,7 @@ pub struct InstalledMod {
     pub path: PathBuf,
 }
 
+#[derive(Clone)]
 pub struct ModrinthClient {
     http: Client,
 }
@@ -163,24 +183,22 @@ impl Default for ModrinthClient {
 impl ModrinthClient {
     pub fn new() -> Self {
         let http = Client::builder()
-            .user_agent("ModsUndBots/0.1.0 (https://github.com/modsundbots)")
+            .user_agent("ModsUndBots/0.2.0 (https://github.com/modsundbots)")
+            .pool_max_idle_per_host(16)
             .build()
             .unwrap_or_else(|_| Client::new());
         Self { http }
     }
 
     pub fn loader_slug(loader: &ModLoader) -> Option<&'static str> {
-        match loader {
-            ModLoader::Vanilla => None,
-            ModLoader::Fabric { .. } => Some("fabric"),
-            ModLoader::NeoForge { .. } => Some("neoforge"),
-        }
+        loader.slug()
     }
 
-    /// Search or browse Modrinth with full facet filtering and pagination.
+    /// Search or browse Modrinth across any `project_type` (`"mod"`, `"modpack"`, `"resourcepack"`, `"shader"`, `"datapack"`).
     #[allow(clippy::too_many_arguments)]
-    pub async fn search_mods_advanced(
+    pub async fn search_projects_advanced(
         &self,
+        project_type: &str,
         query: &str,
         mc_version: Option<&str>,
         loader: Option<&ModLoader>,
@@ -190,7 +208,7 @@ impl ModrinthClient {
         offset: u32,
         limit: u32,
     ) -> Result<ModrinthSearchResponse> {
-        let mut facets = vec![r#"["project_type:mod"]"#.to_string()];
+        let mut facets = vec![format!(r#"["project_type:{project_type}"]"#)];
         if let Some(mc) = mc_version
             && !mc.trim().is_empty()
         {
@@ -234,6 +252,33 @@ impl ModrinthClient {
         }
 
         Ok(resp.json().await?)
+    }
+
+    /// Search or browse Modrinth mods with full facet filtering and pagination.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_mods_advanced(
+        &self,
+        query: &str,
+        mc_version: Option<&str>,
+        loader: Option<&ModLoader>,
+        categories: &[String],
+        environment: ModrinthEnvironment,
+        sort: ModrinthSort,
+        offset: u32,
+        limit: u32,
+    ) -> Result<ModrinthSearchResponse> {
+        self.search_projects_advanced(
+            "mod",
+            query,
+            mc_version,
+            loader,
+            categories,
+            environment,
+            sort,
+            offset,
+            limit,
+        )
+        .await
     }
 
     /// Convenience wrapper for simple searches.
@@ -315,6 +360,94 @@ impl ModrinthClient {
             )));
         }
         Ok(resp.json().await?)
+    }
+
+    /// Batch-fetch Modrinth projects by IDs (`GET /v2/projects?ids=[...]`).
+    pub async fn get_projects(&self, ids: &[String]) -> Result<Vec<ModrinthProject>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids_json = serde_json::to_string(ids)?;
+        let resp = self
+            .http
+            .get(format!("{MODRINTH_API_BASE}/projects"))
+            .query(&[("ids", ids_json.as_str())])
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(MubError::Download(format!(
+                "Modrinth batch projects fetch failed: {text}"
+            )));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Identify Modrinth versions matching the given SHA-1 file hashes (`POST /v2/version_files`).
+    pub async fn get_versions_from_hashes(
+        &self,
+        sha1s: &[String],
+    ) -> Result<HashMap<String, ModrinthVersion>> {
+        if sha1s.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let resp = self
+            .http
+            .post(format!("{MODRINTH_API_BASE}/version_files"))
+            .json(&serde_json::json!({
+                "hashes": sha1s,
+                "algorithm": "sha1"
+            }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(MubError::Download(format!(
+                "Modrinth version_files lookup failed: {text}"
+            )));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Query latest compatible versions for the given SHA-1 file hashes (`POST /v2/version_files/update`).
+    pub async fn get_updates_from_hashes(
+        &self,
+        sha1s: &[String],
+        mc_version: &str,
+        loaders: &[String],
+    ) -> Result<HashMap<String, ModrinthVersion>> {
+        if sha1s.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let resp = self
+            .http
+            .post(format!("{MODRINTH_API_BASE}/version_files/update"))
+            .json(&serde_json::json!({
+                "hashes": sha1s,
+                "algorithm": "sha1",
+                "loaders": loaders,
+                "game_versions": [mc_version]
+            }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(MubError::Download(format!(
+                "Modrinth version_files/update failed: {text}"
+            )));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub(crate) async fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let resp = self.http.get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(MubError::Download(format!(
+                "GET {url} failed with status {}",
+                resp.status()
+            )));
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 
     /// Download and install a `ModrinthVersion` AND its required dependencies into `profile_ids`.
@@ -522,7 +655,7 @@ pub fn list_installed_mods(paths: &AppPaths, profile_id: &str) -> Result<Vec<Ins
             path,
         });
     }
-    mods.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+    mods.sort_by_key(|a| a.filename.to_lowercase());
     Ok(mods)
 }
 

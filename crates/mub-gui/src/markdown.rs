@@ -1,6 +1,6 @@
-use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke};
+use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Sense, Stroke};
 
-use crate::theme::{self, GlassElevation, Palette};
+use crate::theme::{self, Palette};
 
 #[derive(Debug, Clone)]
 enum InlineSpan {
@@ -19,6 +19,17 @@ struct BadgeLink {
 }
 
 #[derive(Debug, Clone)]
+struct TableCell {
+    is_header: bool,
+    spans: Vec<InlineSpan>,
+}
+
+#[derive(Debug, Clone)]
+struct TableBlock {
+    rows: Vec<Vec<TableCell>>,
+}
+
+#[derive(Debug, Clone)]
 enum Block {
     Badges(Vec<BadgeLink>),
     Heading { level: u8, spans: Vec<InlineSpan> },
@@ -26,12 +37,15 @@ enum Block {
     Bullet(Vec<InlineSpan>),
     Quote(Vec<InlineSpan>),
     Code(String),
+    Table(TableBlock),
     Rule,
 }
 
-/// Renders a Modrinth project body (Markdown with embedded HTML badges/tags)
-/// cleanly using Apple Liquid Glass typography, clickable links, code wells,
-/// and frosted badge pills.
+const TABLE_MARKER_PREFIX: &str = "\x1FMUB_TABLE:";
+const TABLE_MARKER_SUFFIX: &str = "\x1F";
+
+/// Renders a Modrinth Markdown or CurseForge HTML project body using sharp
+/// terminal typography, clickable links, code boxes, badge tags, and tables.
 pub fn render_markdown(ui: &mut egui::Ui, palette: &Palette, raw: &str) {
     let blocks = parse_blocks(raw, palette);
 
@@ -42,40 +56,41 @@ pub fn render_markdown(ui: &mut egui::Ui, palette: &Palette, raw: &str) {
         match block {
             Block::Badges(badges) => {
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                     for b in badges {
-                        render_badge_link(ui, b);
+                        render_badge_link(ui, palette, b);
                     }
                 });
             }
             Block::Heading { level, spans } => {
                 ui.add_space(4.0);
                 let size = match level {
-                    1 => 19.0,
-                    2 => 16.5,
-                    3 => 14.5,
-                    _ => 13.5,
+                    1 => 17.0,
+                    2 => 15.0,
+                    3 => 13.5,
+                    _ => 12.5,
                 };
                 render_inline_spans(ui, palette, spans, size, true);
                 if *level <= 2 {
                     ui.add_space(2.0);
-                    theme::glass_divider(ui, palette);
+                    theme::term_divider(ui, palette);
                 }
             }
             Block::Paragraph(spans) => {
-                render_inline_spans(ui, palette, spans, 12.8, false);
+                render_inline_spans(ui, palette, spans, 12.2, false);
             }
             Block::Bullet(spans) => {
                 ui.horizontal_top(|ui| {
                     ui.add_space(6.0);
                     ui.label(
-                        RichText::new("•")
-                            .size(13.0)
+                        RichText::new("▪")
+                            .monospace()
+                            .size(12.2)
                             .strong()
-                            .color(palette.accent_primary),
+                            .color(palette.focus),
                     );
                     ui.vertical(|ui| {
-                        render_inline_spans(ui, palette, spans, 12.6, false);
+                        render_inline_spans(ui, palette, spans, 12.0, false);
                     });
                 });
             }
@@ -89,61 +104,129 @@ pub fn render_markdown(ui: &mut egui::Ui, palette: &Palette, raw: &str) {
                     })
                     .show(ui, |ui| {
                         let resp = ui.vertical(|ui| {
-                            render_inline_spans(ui, palette, spans, 12.5, false);
+                            render_inline_spans(ui, palette, spans, 12.0, false);
                         });
                         let r = resp.response.rect;
                         let bar = egui::Rect::from_min_max(
                             egui::pos2(r.left() - 10.0, r.top()),
-                            egui::pos2(r.left() - 7.0, r.bottom()),
+                            egui::pos2(r.left() - 8.0, r.bottom()),
                         );
                         ui.painter()
-                            .rect_filled(bar, CornerRadius::same(2), palette.accent_primary);
+                            .rect_filled(bar, CornerRadius::ZERO, palette.focus);
                     });
             }
             Block::Code(code) => {
-                theme::glass_box(
+                theme::term_box(
                     ui,
-                    palette,
-                    GlassElevation::Well,
-                    12,
-                    Margin::same(12),
+                    palette.bg,
+                    palette.border_hi,
+                    Margin::same(10),
                     |ui| {
                         ui.set_width(ui.available_width());
                         ui.add(
                             egui::Label::new(
                                 RichText::new(code)
                                     .monospace()
-                                    .size(11.8)
-                                    .color(palette.text_primary),
+                                    .size(11.5)
+                                    .color(palette.ink),
                             )
                             .wrap(),
                         );
                     },
                 );
             }
+            Block::Table(table) => {
+                render_table(ui, palette, table);
+            }
             Block::Rule => {
                 ui.add_space(2.0);
-                theme::glass_divider(ui, palette);
+                theme::term_divider(ui, palette);
             }
         }
     }
 }
 
-fn render_badge_link(ui: &mut egui::Ui, badge: &BadgeLink) {
-    let bg = Color32::from_rgba_unmultiplied(badge.accent.r(), badge.accent.g(), badge.accent.b(), 32);
-    let stroke = Stroke::new(
-        1.0_f32,
-        Color32::from_rgba_unmultiplied(badge.accent.r(), badge.accent.g(), badge.accent.b(), 120),
+fn render_table(ui: &mut egui::Ui, palette: &Palette, table: &TableBlock) {
+    let num_cols = table.rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if num_cols == 0 {
+        return;
+    }
+
+    theme::term_box(
+        ui,
+        palette.surface,
+        palette.border_hi,
+        Margin::same(0),
+        |ui| {
+            ui.set_width(ui.available_width());
+            for (row_idx, row) in table.rows.iter().enumerate() {
+                let is_header = row.iter().any(|c| c.is_header);
+                let row_bg = if is_header {
+                    palette.raised
+                } else if row_idx % 2 == 1 {
+                    palette.panel
+                } else {
+                    palette.surface
+                };
+
+                egui::Frame::new()
+                    .fill(row_bg)
+                    .inner_margin(Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.columns(num_cols, |cols| {
+                            for (col_idx, col_ui) in cols.iter_mut().enumerate() {
+                                if let Some(cell) = row.get(col_idx) {
+                                    if cell.spans.is_empty() {
+                                        col_ui.label(
+                                            RichText::new(" ")
+                                                .monospace()
+                                                .size(11.5)
+                                                .color(palette.ink_dim),
+                                        );
+                                    } else {
+                                        render_inline_spans(
+                                            col_ui,
+                                            palette,
+                                            &cell.spans,
+                                            11.5,
+                                            is_header,
+                                        );
+                                    }
+                                }
+                            }
+                        });
+                    });
+
+                if row_idx + 1 < table.rows.len() {
+                    let (div_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 1.0),
+                        Sense::hover(),
+                    );
+                    ui.painter()
+                        .rect_filled(div_rect, CornerRadius::ZERO, palette.border);
+                }
+            }
+        },
     );
+}
+
+fn render_badge_link(ui: &mut egui::Ui, palette: &Palette, badge: &BadgeLink) {
+    let bg = if palette.preset.is_light() {
+        Color32::from_rgba_unmultiplied(badge.accent.r(), badge.accent.g(), badge.accent.b(), 24)
+    } else {
+        Color32::from_rgba_unmultiplied(badge.accent.r(), badge.accent.g(), badge.accent.b(), 30)
+    };
+    let stroke = Stroke::new(1.0_f32, badge.accent);
     egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
-        .corner_radius(CornerRadius::same(14))
-        .inner_margin(Margin::symmetric(11, 4))
+        .corner_radius(CornerRadius::ZERO)
+        .inner_margin(Margin::symmetric(8, 2))
         .show(ui, |ui| {
             ui.hyperlink_to(
                 RichText::new(&badge.label)
-                    .size(12.0)
+                    .monospace()
+                    .size(11.5)
                     .strong()
                     .color(badge.accent),
                 &badge.url,
@@ -158,8 +241,6 @@ fn render_inline_spans(
     font_size: f32,
     force_bold: bool,
 ) {
-    // Fast path: if there are no links, render as a single smoothly wrapped LayoutJob
-    // so text wraps naturally at any word boundary without awkward widget gaps.
     let has_links = spans.iter().any(|s| matches!(s, InlineSpan::Link { .. }));
     if !has_links {
         let mut job = egui::text::LayoutJob::default();
@@ -170,7 +251,6 @@ fn render_inline_spans(
         return;
     }
 
-    // Mixed text + clickable links: wrap cleanly with tight horizontal spacing
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.spacing_mut().item_spacing.y = 3.0;
@@ -178,7 +258,11 @@ fn render_inline_spans(
             match span {
                 InlineSpan::Text(t) => {
                     if !t.is_empty() {
-                        let mut rt = RichText::new(t).size(font_size).color(palette.text_primary);
+                        let mut rt = RichText::new(t).monospace().size(font_size).color(if force_bold {
+                            palette.ink
+                        } else {
+                            palette.ink_dim
+                        });
                         if force_bold {
                             rt = rt.strong();
                         }
@@ -189,9 +273,10 @@ fn render_inline_spans(
                     if !t.is_empty() {
                         ui.label(
                             RichText::new(t)
+                                .monospace()
                                 .size(font_size)
                                 .strong()
-                                .color(palette.text_primary),
+                                .color(palette.ink),
                         );
                     }
                 }
@@ -199,9 +284,10 @@ fn render_inline_spans(
                     if !t.is_empty() {
                         ui.label(
                             RichText::new(t)
+                                .monospace()
                                 .size(font_size)
                                 .italics()
-                                .color(palette.text_secondary),
+                                .color(palette.ink_dim),
                         );
                     }
                 }
@@ -209,21 +295,19 @@ fn render_inline_spans(
                     if !t.is_empty() {
                         ui.label(
                             RichText::new(t)
-                                .size(font_size - 0.6)
+                                .size(font_size - 0.5)
                                 .monospace()
-                                .color(palette.accent_cyan)
-                                .background_color(palette.well_fill),
+                                .color(palette.meta)
+                                .background_color(palette.bg),
                         );
                     }
                 }
                 InlineSpan::Link { label, url } => {
                     let clean_lbl = label.trim_matches('`');
                     let mut rt = RichText::new(clean_lbl)
+                        .monospace()
                         .size(font_size)
-                        .color(palette.accent_primary);
-                    if label.starts_with('`') && label.ends_with('`') {
-                        rt = rt.monospace();
-                    }
+                        .color(palette.player);
                     if force_bold {
                         rt = rt.strong();
                     }
@@ -247,11 +331,11 @@ fn append_span_to_job(
                 t,
                 0.0,
                 egui::TextFormat {
-                    font_id: egui::FontId::proportional(font_size),
+                    font_id: egui::FontId::monospace(font_size),
                     color: if force_bold {
-                        palette.text_primary
+                        palette.ink
                     } else {
-                        palette.text_secondary
+                        palette.ink_dim
                     },
                     ..Default::default()
                 },
@@ -262,8 +346,8 @@ fn append_span_to_job(
                 t,
                 0.0,
                 egui::TextFormat {
-                    font_id: egui::FontId::proportional(font_size),
-                    color: palette.text_primary,
+                    font_id: egui::FontId::monospace(font_size),
+                    color: palette.ink,
                     ..Default::default()
                 },
             );
@@ -273,9 +357,9 @@ fn append_span_to_job(
                 t,
                 0.0,
                 egui::TextFormat {
-                    font_id: egui::FontId::proportional(font_size),
+                    font_id: egui::FontId::monospace(font_size),
                     italics: true,
-                    color: palette.text_secondary,
+                    color: palette.ink_dim,
                     ..Default::default()
                 },
             );
@@ -285,9 +369,9 @@ fn append_span_to_job(
                 t,
                 0.0,
                 egui::TextFormat {
-                    font_id: egui::FontId::monospace(font_size - 0.6),
-                    color: palette.accent_cyan,
-                    background: palette.well_fill,
+                    font_id: egui::FontId::monospace(font_size - 0.5),
+                    color: palette.meta,
+                    background: palette.bg,
                     ..Default::default()
                 },
             );
@@ -297,9 +381,9 @@ fn append_span_to_job(
                 label,
                 0.0,
                 egui::TextFormat {
-                    font_id: egui::FontId::proportional(font_size),
-                    color: palette.accent_primary,
-                    underline: Stroke::new(1.0_f32, palette.accent_primary),
+                    font_id: egui::FontId::monospace(font_size),
+                    color: palette.player,
+                    underline: Stroke::new(1.0_f32, palette.player),
                     ..Default::default()
                 },
             );
@@ -308,8 +392,7 @@ fn append_span_to_job(
 }
 
 fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
-    // Step 1: Preprocess embedded HTML (extract badge links, convert HTML tags to Markdown/newlines)
-    let (extracted_badges, cleaned) = preprocess_html(raw, palette);
+    let (extracted_badges, tables, cleaned) = preprocess_html(raw, palette);
 
     let mut blocks = Vec::new();
     if !extracted_badges.is_empty() {
@@ -324,15 +407,22 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
         let trimmed = buf.trim();
         if !trimmed.is_empty() {
             let spans = parse_inline(trimmed);
-            if !spans.is_empty() {
+            let has_visible = spans.iter().any(|s| match s {
+                InlineSpan::Text(t) => !t.trim().is_empty(),
+                _ => true,
+            });
+            if has_visible {
                 out.push(Block::Paragraph(spans));
             }
         }
         buf.clear();
     };
 
-    for raw_line in cleaned.lines() {
-        let line = raw_line.trim_end();
+    let lines: Vec<&str> = cleaned.lines().collect();
+    let mut idx = 0;
+
+    while idx < lines.len() {
+        let line = lines[idx].trim_end();
 
         if line.trim_start().starts_with("```") {
             if in_code_block {
@@ -343,6 +433,7 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
                 flush_para(&mut para_buf, &mut blocks);
                 in_code_block = true;
             }
+            idx += 1;
             continue;
         }
 
@@ -351,12 +442,50 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
                 code_buf.push('\n');
             }
             code_buf.push_str(line);
+            idx += 1;
             continue;
         }
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
             flush_para(&mut para_buf, &mut blocks);
+            idx += 1;
+            continue;
+        }
+
+        // Extracted HTML table placeholder
+        if let Some(inner) = trimmed
+            .strip_prefix(TABLE_MARKER_PREFIX)
+            .and_then(|s| s.strip_suffix(TABLE_MARKER_SUFFIX))
+            && let Ok(table_idx) = inner.parse::<usize>()
+            && let Some(table) = tables.get(table_idx)
+        {
+            flush_para(&mut para_buf, &mut blocks);
+            if !table.rows.is_empty() {
+                blocks.push(Block::Table(table.clone()));
+            }
+            idx += 1;
+            continue;
+        }
+
+        // Markdown pipe table: header row + separator row (`| --- | --- |`)
+        if trimmed.starts_with('|')
+            && idx + 1 < lines.len()
+            && is_markdown_table_separator(lines[idx + 1].trim())
+        {
+            flush_para(&mut para_buf, &mut blocks);
+            let mut rows = Vec::new();
+            rows.push(parse_pipe_row(trimmed, true));
+            idx += 2;
+            while idx < lines.len() {
+                let row_line = lines[idx].trim();
+                if row_line.is_empty() || !row_line.contains('|') {
+                    break;
+                }
+                rows.push(parse_pipe_row(row_line, false));
+                idx += 1;
+            }
+            blocks.push(Block::Table(TableBlock { rows }));
             continue;
         }
 
@@ -364,6 +493,7 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
         if is_horizontal_rule(trimmed) {
             flush_para(&mut para_buf, &mut blocks);
             blocks.push(Block::Rule);
+            idx += 1;
             continue;
         }
 
@@ -374,6 +504,7 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
             if !spans.is_empty() {
                 blocks.push(Block::Heading { level, spans });
             }
+            idx += 1;
             continue;
         }
 
@@ -384,6 +515,7 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
             if !spans.is_empty() {
                 blocks.push(Block::Quote(spans));
             }
+            idx += 1;
             continue;
         }
 
@@ -394,11 +526,13 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
             if !spans.is_empty() {
                 blocks.push(Block::Bullet(spans));
             }
+            idx += 1;
             continue;
         }
 
         // Standalone Markdown image line `![alt](url)` -> skip decorative banners
-        if trimmed.starts_with("![") && trimmed.ends_with(')') && !trimmed.contains("](") {
+        if is_standalone_markdown_image(trimmed) {
+            idx += 1;
             continue;
         }
 
@@ -407,6 +541,7 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
             para_buf.push(' ');
         }
         para_buf.push_str(trimmed);
+        idx += 1;
     }
 
     if in_code_block && !code_buf.trim().is_empty() {
@@ -417,11 +552,44 @@ fn parse_blocks(raw: &str, palette: &Palette) -> Vec<Block> {
     blocks
 }
 
-/// Converts HTML fragments common in Modrinth descriptions (`<a href><img/></a>`,
-/// `<br>`, `<img/>`, `<h1>`, `<b>`, `<i>`, `<code>`, `<li>`, etc.) into clean
-/// Markdown text plus extracted top-level link badges.
-fn preprocess_html(raw: &str, palette: &Palette) -> (Vec<BadgeLink>, String) {
+fn is_standalone_markdown_image(trimmed: &str) -> bool {
+    let Some(after_bang) = trimmed.strip_prefix("![") else {
+        return false;
+    };
+    let Some(close_br) = after_bang.find("](") else {
+        return false;
+    };
+    let after_url = &after_bang[close_br + 2..];
+    let Some(close_par) = after_url.find(')') else {
+        return false;
+    };
+    close_par + 1 == after_url.len()
+}
+
+fn is_markdown_table_separator(line: &str) -> bool {
+    if !line.contains('|') || !line.contains('-') {
+        return false;
+    }
+    line.chars()
+        .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+}
+
+fn parse_pipe_row(line: &str, is_header: bool) -> Vec<TableCell> {
+    let trimmed = line.trim().trim_matches('|');
+    trimmed
+        .split('|')
+        .map(|cell| TableCell {
+            is_header,
+            spans: parse_inline(cell.trim()),
+        })
+        .collect()
+}
+
+/// Converts HTML fragments common in Modrinth & CurseForge descriptions into clean
+/// Markdown text plus extracted top-level link badges and structured HTML tables.
+fn preprocess_html(raw: &str, palette: &Palette) -> (Vec<BadgeLink>, Vec<TableBlock>, String) {
     let mut badges: Vec<BadgeLink> = Vec::new();
+    let mut tables: Vec<TableBlock> = Vec::new();
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
 
@@ -429,18 +597,63 @@ fn preprocess_html(raw: &str, palette: &Palette) -> (Vec<BadgeLink>, String) {
         out.push_str(&rest[..lt]);
         let after_lt = &rest[lt..];
 
+        // Strip HTML comments `<!-- ... -->`
+        if after_lt.starts_with("<!--") {
+            if let Some(end_idx) = after_lt.find("-->") {
+                rest = &after_lt[end_idx + 3..];
+                continue;
+            }
+            return (badges, tables, decode_entities(&out));
+        }
+
         // Find closing '>'
         let Some(gt) = after_lt.find('>') else {
             out.push_str(after_lt);
-            return (badges, decode_entities(&out));
+            return (badges, tables, decode_entities(&out));
         };
 
         let tag_full = &after_lt[1..gt];
         let tag_trimmed = tag_full.trim();
         let tag_lower = tag_trimmed.to_ascii_lowercase();
+        let tag_name = tag_lower
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/');
+
+        // Strip `<style>...</style>` and `<script>...</script>` blocks completely
+        if tag_name == "style" || tag_name == "script" {
+            let after_open = &after_lt[gt + 1..];
+            let close_needle = format!("</{tag_name}>");
+            if let Some(close_idx) = find_closing_tag_ci(after_open, &close_needle) {
+                rest = &after_open[close_idx + close_needle.len()..];
+                continue;
+            }
+            return (badges, tables, decode_entities(&out));
+        }
+
+        // Parse HTML `<table>...</table>` into structured terminal grid
+        if tag_name == "table" {
+            let after_open = &after_lt[gt + 1..];
+            if let Some(close_idx) = find_closing_tag_ci(after_open, "</table>") {
+                let table_html = &after_open[..close_idx];
+                let table = parse_html_table(table_html);
+                if !table.rows.is_empty() {
+                    let t_idx = tables.len();
+                    tables.push(table);
+                    out.push('\n');
+                    out.push_str(TABLE_MARKER_PREFIX);
+                    out.push_str(&t_idx.to_string());
+                    out.push_str(TABLE_MARKER_SUFFIX);
+                    out.push('\n');
+                }
+                rest = &after_open[close_idx + "</table>".len()..];
+                continue;
+            }
+        }
 
         // Handle `<a href="...">...</a>`
-        if tag_lower.starts_with("a ") || tag_lower == "a" {
+        if tag_name == "a" {
             let after_open = &after_lt[gt + 1..];
             if let Some(close_idx) = find_closing_tag_ci(after_open, "</a>") {
                 let inner = &after_open[..close_idx];
@@ -449,7 +662,6 @@ fn preprocess_html(raw: &str, palette: &Palette) -> (Vec<BadgeLink>, String) {
 
                 if !href.is_empty() {
                     if inner_lower.contains("<img") {
-                        // Image-wrapped link (e.g. Discord / PayPal / Patreon shields.io badge)
                         let alt = extract_attr(inner, "alt").unwrap_or_default();
                         let (label, accent) = classify_badge(&href, &alt, palette);
                         if !badges.iter().any(|b| b.url == href) {
@@ -476,49 +688,191 @@ fn preprocess_html(raw: &str, palette: &Palette) -> (Vec<BadgeLink>, String) {
         }
 
         // Convert common structural & inline HTML tags
-        if tag_lower.starts_with("br") {
+        if tag_name == "br" {
             out.push('\n');
-        } else if tag_lower.starts_with("hr") {
+        } else if tag_name == "hr" {
             out.push_str("\n---\n");
-        } else if tag_lower.starts_with("h1") {
+        } else if tag_name == "h1" {
             out.push_str("\n# ");
-        } else if tag_lower.starts_with("h2") {
+        } else if tag_name == "h2" {
             out.push_str("\n## ");
-        } else if tag_lower.starts_with("h3") {
+        } else if tag_name == "h3" {
             out.push_str("\n### ");
-        } else if tag_lower.starts_with("/h1")
-            || tag_lower.starts_with("/h2")
-            || tag_lower.starts_with("/h3")
-            || tag_lower.starts_with("/p")
-            || tag_lower.starts_with("/div")
-            || tag_lower.starts_with("/summary")
-            || tag_lower.starts_with("/center")
-        {
+        } else if tag_name == "h4" {
+            out.push_str("\n#### ");
+        } else if tag_name == "h5" {
+            out.push_str("\n##### ");
+        } else if tag_name == "h6" {
+            out.push_str("\n###### ");
+        } else if tag_name == "blockquote" {
+            out.push_str("\n> ");
+        } else if tag_name == "pre" || tag_name == "/pre" {
+            out.push_str("\n```\n");
+        } else if matches!(
+            tag_name,
+            "/h1" | "/h2" | "/h3" | "/h4" | "/h5" | "/h6" | "/p" | "/div" | "/summary"
+                | "/center" | "/blockquote" | "/ul" | "/ol"
+        ) {
             out.push_str("\n\n");
-        } else if tag_lower.starts_with("li") {
+        } else if tag_name == "li" {
             out.push_str("\n- ");
-        } else if tag_lower == "b"
-            || tag_lower == "/b"
-            || tag_lower == "strong"
-            || tag_lower == "/strong"
-        {
+        } else if matches!(tag_name, "b" | "/b" | "strong" | "/strong") {
             out.push_str("**");
-        } else if tag_lower == "i"
-            || tag_lower == "/i"
-            || tag_lower == "em"
-            || tag_lower == "/em"
-        {
+        } else if matches!(tag_name, "i" | "/i" | "em" | "/em") {
             out.push('*');
-        } else if tag_lower == "code" || tag_lower == "/code" {
+        } else if matches!(tag_name, "code" | "/code") {
             out.push('`');
         }
-        // Ignore `<img>`, `<p>`, `<div>`, `<center>`, `<details>`, `<ul>`, `</ol>`, etc.
 
         rest = &after_lt[gt + 1..];
     }
 
     out.push_str(rest);
-    (badges, decode_entities(&out))
+    (badges, tables, decode_entities(&out))
+}
+
+fn parse_html_table(table_html: &str) -> TableBlock {
+    let mut rows = Vec::new();
+    let mut rest = table_html;
+
+    while let Some(tr_start) = find_tag_start_ci(rest, "tr") {
+        let after_tr = &rest[tr_start..];
+        let Some(tr_gt) = after_tr.find('>') else {
+            break;
+        };
+        let after_tr_open = &after_tr[tr_gt + 1..];
+        let tr_end = find_closing_tag_ci(after_tr_open, "</tr>").unwrap_or(after_tr_open.len());
+        let row_html = &after_tr_open[..tr_end];
+
+        let cells = parse_html_row_cells(row_html);
+        if !cells.is_empty() {
+            rows.push(cells);
+        }
+
+        let advance = (tr_end + "</tr>".len()).min(after_tr_open.len());
+        rest = &after_tr_open[advance..];
+    }
+
+    TableBlock { rows }
+}
+
+fn parse_html_row_cells(row_html: &str) -> Vec<TableCell> {
+    let mut cells = Vec::new();
+    let mut rest = row_html;
+
+    loop {
+        let next_th = find_tag_start_ci(rest, "th");
+        let next_td = find_tag_start_ci(rest, "td");
+        let (cell_start, is_header, close_tag) = match (next_th, next_td) {
+            (Some(a), Some(b)) if a <= b => (a, true, "</th>"),
+            (Some(_), Some(b)) => (b, false, "</td>"),
+            (Some(a), None) => (a, true, "</th>"),
+            (None, Some(b)) => (b, false, "</td>"),
+            (None, None) => break,
+        };
+
+        let after_tag = &rest[cell_start..];
+        let Some(gt) = after_tag.find('>') else {
+            break;
+        };
+        let after_open = &after_tag[gt + 1..];
+        let cell_end = find_closing_tag_ci(after_open, close_tag).unwrap_or(after_open.len());
+        let cell_html = &after_open[..cell_end];
+
+        let cleaned = clean_inline_html(cell_html);
+        cells.push(TableCell {
+            is_header,
+            spans: parse_inline(cleaned.trim()),
+        });
+
+        let advance = (cell_end + close_tag.len()).min(after_open.len());
+        rest = &after_open[advance..];
+    }
+
+    cells
+}
+
+fn clean_inline_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let after_lt = &rest[lt..];
+        if after_lt.starts_with("<!--") {
+            if let Some(end_idx) = after_lt.find("-->") {
+                rest = &after_lt[end_idx + 3..];
+                continue;
+            }
+            break;
+        }
+        let Some(gt) = after_lt.find('>') else {
+            out.push_str(after_lt);
+            return decode_entities(&out);
+        };
+        let tag_trimmed = after_lt[1..gt].trim();
+        let tag_lower = tag_trimmed.to_ascii_lowercase();
+        let tag_name = tag_lower
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/');
+
+        if tag_name == "a" {
+            let after_open = &after_lt[gt + 1..];
+            if let Some(close_idx) = find_closing_tag_ci(after_open, "</a>") {
+                let inner = &after_open[..close_idx];
+                let href = extract_attr(tag_trimmed, "href").unwrap_or_default();
+                let text = strip_all_tags(inner).trim().to_string();
+                if !href.is_empty() && !text.is_empty() {
+                    out.push('[');
+                    out.push_str(&text);
+                    out.push_str("](");
+                    out.push_str(&href);
+                    out.push(')');
+                } else if !text.is_empty() {
+                    out.push_str(&text);
+                }
+                rest = &after_open[close_idx + 4..];
+                continue;
+            }
+        } else if tag_name == "br" || tag_name == "/p" || tag_name == "/div" {
+            out.push(' ');
+        } else if matches!(tag_name, "b" | "/b" | "strong" | "/strong") {
+            out.push_str("**");
+        } else if matches!(tag_name, "i" | "/i" | "em" | "/em") {
+            out.push('*');
+        } else if matches!(tag_name, "code" | "/code") {
+            out.push('`');
+        }
+
+        rest = &after_lt[gt + 1..];
+    }
+
+    out.push_str(rest);
+    decode_entities(&out)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn find_tag_start_ci(haystack: &str, tag_name_lower: &str) -> Option<usize> {
+    let lower = haystack.to_ascii_lowercase();
+    let mut offset = 0;
+    while let Some(pos) = lower[offset..].find('<') {
+        let abs = offset + pos;
+        let after = &lower[abs + 1..];
+        if let Some(rest) = after.strip_prefix(tag_name_lower)
+            && rest
+                .chars()
+                .next()
+                .is_some_and(|c| c == '>' || c.is_whitespace() || c == '/')
+        {
+            return Some(abs);
+        }
+        offset = abs + 1;
+    }
+    None
 }
 
 fn find_closing_tag_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
@@ -562,42 +916,41 @@ fn strip_all_tags(input: &str) -> String {
 fn classify_badge(url: &str, alt: &str, palette: &Palette) -> (String, Color32) {
     let u = url.to_ascii_lowercase();
     if u.contains("discord.gg") || u.contains("discord.com") {
-        return ("Discord".to_string(), Color32::from_rgb(124, 140, 255));
+        return ("DISCORD".to_string(), palette.focus);
     }
     if u.contains("patreon.com") {
-        return ("Patreon".to_string(), Color32::from_rgb(255, 118, 96));
+        return ("PATREON".to_string(), palette.cf);
     }
     if u.contains("paypal.me") || u.contains("paypal.com") {
-        return ("PayPal".to_string(), palette.accent_blue);
+        return ("PAYPAL".to_string(), palette.player);
     }
     if u.contains("ko-fi.com") {
-        return ("Ko-fi".to_string(), Color32::from_rgb(255, 122, 138));
+        return ("KO-FI".to_string(), palette.bot);
     }
     if u.contains("github.com") {
-        return ("GitHub".to_string(), palette.text_primary);
+        return ("GITHUB".to_string(), palette.ink);
     }
     if u.contains("modrinth.com") {
-        return ("Modrinth".to_string(), palette.accent_emerald);
+        return ("MODRINTH".to_string(), palette.mr);
     }
     if u.contains("curseforge.com") {
-        return ("CurseForge".to_string(), palette.accent_amber);
+        return ("CURSEFORGE".to_string(), palette.cf);
     }
     if u.contains("youtube.com") || u.contains("youtu.be") {
-        return ("YouTube".to_string(), palette.accent_red);
+        return ("YOUTUBE".to_string(), palette.danger);
     }
     if !alt.trim().is_empty() {
-        return (alt.trim().to_string(), palette.accent_primary);
+        return (alt.trim().to_ascii_uppercase(), palette.meta);
     }
-    // Fall back to clean hostname
     let host = url
         .split("://")
         .nth(1)
         .unwrap_or(url)
         .split('/')
         .next()
-        .unwrap_or("Link")
+        .unwrap_or("LINK")
         .trim_start_matches("www.");
-    (host.to_string(), palette.accent_primary)
+    (host.to_ascii_uppercase(), palette.player)
 }
 
 fn decode_entities(s: &str) -> String {
@@ -608,6 +961,13 @@ fn decode_entities(s: &str) -> String {
         .replace("&#39;", "'")
         .replace("&apos;", "'")
         .replace("&nbsp;", " ")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–")
+        .replace("&hellip;", "...")
+        .replace("&bull;", "•")
+        .replace("&copy;", "©")
+        .replace("&reg;", "®")
+        .replace("&trade;", "™")
 }
 
 fn is_horizontal_rule(line: &str) -> bool {
@@ -634,7 +994,6 @@ fn strip_list_prefix(line: &str) -> Option<&str> {
     if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
         return Some(rest.trim());
     }
-    // Numbered list e.g. "1. Item"
     let digits = line.bytes().take_while(|b| b.is_ascii_digit()).count();
     if digits > 0 && line[digits..].starts_with(". ") {
         return Some(line[digits + 2..].trim());
@@ -642,7 +1001,7 @@ fn strip_list_prefix(line: &str) -> Option<&str> {
     None
 }
 
-/// Parses inline Markdown: `[label](url)`, `![alt](url)`, `**bold**`, `*italic*`, `` `code` ``.
+/// Parses inline Markdown: `[![alt](img)](url)`, `[label](url)`, `![alt](url)`, `**bold**`, `*italic*`, `` `code` ``.
 fn parse_inline(input: &str) -> Vec<InlineSpan> {
     let mut spans = Vec::new();
     let mut text_buf = String::new();
@@ -657,6 +1016,34 @@ fn parse_inline(input: &str) -> Vec<InlineSpan> {
 
     while i < bytes.len() {
         let rest = &input[i..];
+
+        // Linked Markdown image `[![alt](img)](url)` -> render as clickable `[alt](url)` if alt non-empty, else skip
+        if rest.starts_with("[![")
+            && let Some(img_mid) = rest[3..].find("](")
+        {
+            let alt = &rest[3..3 + img_mid];
+            let after_img_mid = &rest[3 + img_mid + 2..];
+            if let Some(img_end) = after_img_mid.find(')') {
+                let after_img = &after_img_mid[img_end + 1..];
+                if let Some(after_link_open) = after_img.strip_prefix("](")
+                    && let Some(link_end) = after_link_open.find(')')
+                {
+                    let url = &after_link_open[..link_end];
+                    if !alt.trim().is_empty()
+                        && (url.starts_with("http://") || url.starts_with("https://"))
+                    {
+                        flush_text(&mut text_buf, &mut spans);
+                        spans.push(InlineSpan::Link {
+                            label: alt.trim().to_string(),
+                            url: url.to_string(),
+                        });
+                    }
+                    let consumed = rest.len() - after_link_open[link_end + 1..].len();
+                    i += consumed;
+                    continue;
+                }
+            }
+        }
 
         // Markdown image `![alt](url)` -> skip inline decorative images
         if rest.starts_with("![")
@@ -731,4 +1118,83 @@ fn parse_inline(input: &str) -> Vec<InlineSpan> {
 
     flush_text(&mut text_buf, &mut spans);
     spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ThemePreset;
+
+    #[test]
+    fn skips_standalone_markdown_images_and_strips_comments_style_script() {
+        let palette = Palette::for_preset(ThemePreset::SynthTerminal);
+        let input = r#"
+<!-- hidden html comment -->
+<style>body { color: red; }</style>
+<script>alert("x")</script>
+![Banner](https://example.com/banner.png)
+
+Hello **Sodium**!
+"#;
+        let blocks = parse_blocks(input, &palette);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            Block::Paragraph(spans) => {
+                assert!(matches!(&spans[0], InlineSpan::Text(t) if t == "Hello "));
+                assert!(matches!(&spans[1], InlineSpan::Bold(t) if t == "Sodium"));
+                assert!(matches!(&spans[2], InlineSpan::Text(t) if t == "!"));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_curseforge_html_table_and_badges() {
+        let palette = Palette::for_preset(ThemePreset::SynthTerminal);
+        let input = r#"
+<a href="https://discord.gg/test"><img alt="Discord" src="badge.png"/></a>
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Modrinth</th><th>CurseForge</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Hash</td><td><code>SHA-1</code></td><td><a href="https://example.com">Murmur2</a></td></tr>
+  </tbody>
+</table>
+"#;
+        let blocks = parse_blocks(input, &palette);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], Block::Badges(b) if b.len() == 1 && b[0].label == "DISCORD"));
+        match &blocks[1] {
+            Block::Table(tbl) => {
+                assert_eq!(tbl.rows.len(), 2);
+                assert_eq!(tbl.rows[0].len(), 3);
+                assert!(tbl.rows[0][0].is_header);
+                assert!(!tbl.rows[1][0].is_header);
+                assert!(matches!(&tbl.rows[1][1].spans[0], InlineSpan::Code(c) if c == "SHA-1"));
+                assert!(matches!(
+                    &tbl.rows[1][2].spans[0],
+                    InlineSpan::Link { label, url } if label == "Murmur2" && url == "https://example.com"
+                ));
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn converts_html_headings_inline_tags_and_pipe_tables() {
+        let palette = Palette::for_preset(ThemePreset::TokyoNight);
+        let input = r#"
+<h2>Overview</h2>
+<p>Supports <strong>Fabric</strong> and <code>NeoForge</code>.</p>
+
+| Loader | Status |
+| --- | --- |
+| Fabric | OK |
+"#;
+        let blocks = parse_blocks(input, &palette);
+        assert!(matches!(&blocks[0], Block::Heading { level: 2, .. }));
+        assert!(matches!(&blocks[1], Block::Paragraph(spans) if spans.iter().any(|s| matches!(s, InlineSpan::Bold(b) if b == "Fabric")) && spans.iter().any(|s| matches!(s, InlineSpan::Code(c) if c == "NeoForge"))));
+        assert!(matches!(&blocks[2], Block::Table(tbl) if tbl.rows.len() == 2));
+    }
 }

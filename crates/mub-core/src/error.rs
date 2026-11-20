@@ -34,6 +34,18 @@ pub enum MubError {
 
     #[error("Launcher error: {0}")]
     Launch(String),
+
+    #[error("CurseForge file '{filename}' has third-party distribution disabled; download manually at {website_url}")]
+    CurseForgeDistributionRestricted {
+        filename: String,
+        website_url: String,
+    },
+
+    #[error("CurseForge authentication error: {0}")]
+    CurseForgeAuth(String),
+
+    #[error("Modpack error: {0}")]
+    Modpack(String),
 }
 
 pub type Result<T> = std::result::Result<T, MubError>;
