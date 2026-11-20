@@ -91,13 +91,44 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
-      - name: Package macOS archive
+      - name: Package macOS app bundle & archive
+        env:
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/modsundbots dist/
-          cp target/${{ matrix.target }}/release/mub dist/
-          chmod +x dist/modsundbots dist/mub
-          tar -czf modsundbots-macos-${{ matrix.arch }}.tar.gz -C dist modsundbots mub
+          VERSION="${TAG_NAME#v}"
+          mkdir -p dist/ModsUndBots.app/Contents/MacOS
+          cp target/${{ matrix.target }}/release/modsundbots dist/ModsUndBots.app/Contents/MacOS/modsundbots
+          cp target/${{ matrix.target }}/release/mub dist/mub
+          chmod +x dist/ModsUndBots.app/Contents/MacOS/modsundbots dist/mub
+          printf 'APPL????' > dist/ModsUndBots.app/Contents/PkgInfo
+          cat > dist/ModsUndBots.app/Contents/Info.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>ModsUndBots</string>
+            <key>CFBundleDisplayName</key>
+            <string>ModsUndBots</string>
+            <key>CFBundleIdentifier</key>
+            <string>dev.modsundbots.ModsUndBots</string>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundleExecutable</key>
+            <string>modsundbots</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --deep --sign - dist/ModsUndBots.app
+          tar -czf modsundbots-macos-${{ matrix.arch }}.tar.gz -C dist ModsUndBots.app mub
 
       - name: Upload to GitHub Release
         env:
