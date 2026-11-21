@@ -96,7 +96,8 @@ jobs:
           TAG_NAME: ${{ inputs.tag || github.ref_name }}
         run: |
           VERSION="${TAG_NAME#v}"
-          mkdir -p dist/ModsUndBots.app/Contents/MacOS
+          mkdir -p dist/ModsUndBots.app/Contents/MacOS dist/ModsUndBots.app/Contents/Resources
+          cp crates/mub-gui/assets/AppIcon.icns dist/ModsUndBots.app/Contents/Resources/AppIcon.icns
           cp target/${{ matrix.target }}/release/modsundbots dist/ModsUndBots.app/Contents/MacOS/modsundbots
           cp target/${{ matrix.target }}/release/mub dist/mub
           chmod +x dist/ModsUndBots.app/Contents/MacOS/modsundbots dist/mub
@@ -118,6 +119,8 @@ jobs:
             <string>${VERSION}</string>
             <key>CFBundleExecutable</key>
             <string>modsundbots</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>NSHighResolutionCapable</key>
