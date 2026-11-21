@@ -87,6 +87,7 @@ pub enum ButtonTone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavIcon {
     Instances,
+    Collections,
     Discover,
     Accounts,
     Console,
@@ -1430,6 +1431,11 @@ fn paint_pixel_nav_icon(p: &egui::Painter, rect: Rect, icon: NavIcon, color: Col
             px(6, 1, 3, 3);
             px(1, 6, 3, 3);
             px(6, 6, 3, 3);
+        }
+        NavIcon::Collections => {
+            px(2, 1, 6, 1);
+            px(1, 3, 8, 1);
+            px(1, 5, 8, 4);
         }
         NavIcon::Discover => {
             px(2, 1, 6, 1);

@@ -1,5 +1,6 @@
 pub mod account;
 pub mod catalog;
+pub mod collection;
 pub mod curseforge;
 pub mod error;
 pub mod java;
@@ -19,6 +20,7 @@ pub use catalog::{
     list_installed_content, list_saved_worlds, remove_installed_content, sync_content_to_profiles,
     toggle_installed_content,
 };
+pub use collection::{BotCollection, BotCollectionStore};
 pub use curseforge::{
     CLASS_DATAPACKS, CLASS_MODPACKS, CLASS_MODS, CLASS_RESOURCEPACKS, CLASS_SHADERS, CfAsset,
     CfAuthor, CfCategory, CfDependency, CfFile, CfFileIndex, CfFingerprintMatch,
@@ -30,7 +32,7 @@ pub use java::{
     JavaInstallation, detect_java_installations, pick_best_java, required_java_major,
     resolve_java_for_mc,
 };
-pub use launcher::{InstanceManager, InstanceState, InstanceStatus};
+pub use launcher::{InstanceManager, InstanceState, InstanceStatus, prepare_profile_version};
 pub use modpack::{
     ModpackImportResult, MrpackEnv, MrpackFile, MrpackIndex, RestrictedPackFile, export_mrpack,
     import_curseforge_pack, import_mrpack, install_modpack_from_catalog,

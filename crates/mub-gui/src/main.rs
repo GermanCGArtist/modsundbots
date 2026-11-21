@@ -6,9 +6,9 @@ mod mods_view;
 mod theme;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Id, Margin, Order, RichText, Stroke};
 use instance_view::{
@@ -18,13 +18,13 @@ use instance_view::{
 use mods_view::{ModsAction, ModsViewState};
 use mub_core::mojang::VersionEntry;
 use mub_core::{
-    APP_VERSION, Account, AccountRole, AccountStore, AppPaths, CatalogClient, ContentKind,
-    CurseForgeClient, DeviceCodeResponse, InstalledUpdateResult, InstanceManager, InstanceState,
-    InstanceStatus, JavaInstallation, LauncherSettings, LoaderVersionInfo, ModLoader,
-    ModpackImportResult, MsaAuthClient, Profile, ProfileKind, ProfileStore, UpdateCheckResult,
-    VersionManager, check_for_updates, cleanup_old_update_files, detect_java_installations,
-    download_and_install_update, import_curseforge_pack, import_mrpack, list_installed_content,
-    open_in_file_manager, spawn_updated_relaunch,
+    APP_VERSION, Account, AccountRole, AccountStore, AppPaths, BotCollection, BotCollectionStore,
+    CatalogClient, ContentKind, CurseForgeClient, DeviceCodeResponse, InstalledUpdateResult,
+    InstanceManager, InstanceState, InstanceStatus, JavaInstallation, LauncherSettings,
+    LoaderVersionInfo, ModLoader, ModpackImportResult, MsaAuthClient, Profile, ProfileKind,
+    ProfileStore, UpdateCheckResult, VersionManager, check_for_updates, cleanup_old_update_files,
+    detect_java_installations, download_and_install_update, import_curseforge_pack, import_mrpack,
+    list_installed_content, open_in_file_manager, spawn_updated_relaunch,
 };
 use theme::{ButtonTone, NavIcon, Palette, ThemePreset};
 use tokio::sync::mpsc;
@@ -520,6 +520,7 @@ impl VersionPickerCache {
 enum ActiveView {
     Instances,
     InstanceDetail,
+    Collections,
     Discover,
     Accounts,
     Console,
@@ -566,7 +567,25 @@ struct MubApp {
     settings: LauncherSettings,
     accounts: AccountStore,
     profiles: ProfileStore,
+    collections: BotCollectionStore,
     manager: InstanceManager,
+
+    // External-change sync (e.g. from MCP server)
+    last_store_check: Instant,
+    accounts_mtime: Option<SystemTime>,
+    profiles_mtime: Option<SystemTime>,
+    collections_mtime: Option<SystemTime>,
+
+    // Bot Collections UI state
+    show_new_collection: bool,
+    new_col_name: String,
+    new_col_desc: String,
+    new_col_stagger: String,
+    new_col_include_all_bots: bool,
+    editing_collection_id: Option<String>,
+    edit_col_name: String,
+    edit_col_desc: String,
+    edit_col_stagger: String,
 
     theme_preset: ThemePreset,
     active_view: ActiveView,
@@ -660,6 +679,10 @@ impl MubApp {
         let settings = LauncherSettings::load(&paths.settings_file()).unwrap_or_default();
         let accounts = AccountStore::load(&paths.accounts_file()).unwrap_or_default();
         let profiles = ProfileStore::load(&paths.profiles_file()).unwrap_or_default();
+        let collections = BotCollectionStore::load(&paths.collections_file()).unwrap_or_default();
+        let accounts_mtime = file_mtime(&paths.accounts_file());
+        let profiles_mtime = file_mtime(&paths.profiles_file());
+        let collections_mtime = file_mtime(&paths.collections_file());
 
         let theme_preset = ThemePreset::from_id(&settings.theme_palette);
         theme::apply_theme(&cc.egui_ctx, theme_preset);
@@ -718,7 +741,21 @@ impl MubApp {
             settings,
             accounts,
             profiles,
+            collections,
             manager,
+            last_store_check: Instant::now(),
+            accounts_mtime,
+            profiles_mtime,
+            collections_mtime,
+            show_new_collection: false,
+            new_col_name: String::new(),
+            new_col_desc: String::new(),
+            new_col_stagger: String::new(),
+            new_col_include_all_bots: true,
+            editing_collection_id: None,
+            edit_col_name: String::new(),
+            edit_col_desc: String::new(),
+            edit_col_stagger: String::new(),
             theme_preset,
             active_view: ActiveView::Instances,
             target_profile_id: first_profile_id.clone(),
@@ -1022,6 +1059,10 @@ impl MubApp {
     }
 
     fn launch_profiles(&mut self, profiles: Vec<Profile>) {
+        self.launch_profiles_with_stagger(profiles, None);
+    }
+
+    fn launch_profiles_with_stagger(&mut self, profiles: Vec<Profile>, stagger_ms_override: Option<u64>) {
         let mut items = Vec::new();
         for p in profiles {
             let Some(acc_id) = &p.account_id else {
@@ -1077,7 +1118,9 @@ impl MubApp {
                 }
                 prepared_items.push((p, acc));
             }
-            let results = mgr.launch_batch(&paths, &settings, prepared_items).await;
+            let results = mgr
+                .launch_batch_with_stagger(&paths, &settings, prepared_items, stagger_ms_override)
+                .await;
             for (id, res) in results {
                 if let Err(e) = res {
                     let _ = tx.send(BgEvent::Toast(
@@ -1087,6 +1130,96 @@ impl MubApp {
                 }
             }
         });
+    }
+
+    fn launch_collection(&mut self, collection_id: &str) {
+        let Some(col) = self.collections.get(collection_id).cloned() else {
+            return;
+        };
+        let to_launch: Vec<Profile> = col
+            .profile_ids
+            .iter()
+            .filter_map(|pid| self.profiles.get(pid))
+            .filter(|p| {
+                !matches!(
+                    self.statuses.get(&p.id).map(|s| &s.state),
+                    Some(InstanceState::Running | InstanceState::Preparing)
+                )
+            })
+            .cloned()
+            .collect();
+
+        if to_launch.is_empty() {
+            self.push_toast(
+                ToastTone::Bot,
+                format!("No idle bot instances in '{}' to start.", col.name),
+            );
+            return;
+        }
+
+        if let Some(c) = self.collections.get_mut(collection_id) {
+            c.mark_started();
+        }
+        let _ = self.collections.save(&self.paths.collections_file());
+        self.collections_mtime = file_mtime(&self.paths.collections_file());
+
+        self.push_toast(
+            ToastTone::Bot,
+            format!("Starting {} bot(s) in '{}'...", to_launch.len(), col.name),
+        );
+        self.launch_profiles_with_stagger(to_launch, col.stagger_ms);
+    }
+
+    fn stop_collection(&self, collection_id: &str) {
+        let Some(col) = self.collections.get(collection_id) else {
+            return;
+        };
+        let ids: Vec<String> = col
+            .profile_ids
+            .iter()
+            .filter(|pid| {
+                matches!(
+                    self.statuses.get(*pid).map(|s| &s.state),
+                    Some(InstanceState::Running | InstanceState::Preparing)
+                )
+            })
+            .cloned()
+            .collect();
+        let mgr = self.manager.clone();
+        self.rt.spawn(async move {
+            for id in ids {
+                let _ = mgr.stop_profile(&id).await;
+            }
+        });
+    }
+
+    fn sync_external_stores_if_changed(&mut self) {
+        if self.last_store_check.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_store_check = Instant::now();
+
+        let acc_m = file_mtime(&self.paths.accounts_file());
+        if acc_m != self.accounts_mtime {
+            self.accounts_mtime = acc_m;
+            if let Ok(loaded) = AccountStore::load(&self.paths.accounts_file()) {
+                self.accounts = loaded;
+            }
+        }
+        let prof_m = file_mtime(&self.paths.profiles_file());
+        if prof_m != self.profiles_mtime {
+            self.profiles_mtime = prof_m;
+            if let Ok(loaded) = ProfileStore::load(&self.paths.profiles_file()) {
+                self.profiles = loaded;
+            }
+        }
+        let col_m = file_mtime(&self.paths.collections_file());
+        if col_m != self.collections_mtime {
+            self.collections_mtime = col_m;
+            if let Ok(loaded) = BotCollectionStore::load(&self.paths.collections_file()) {
+                self.collections = loaded;
+            }
+        }
     }
 
     fn launch_all_bots(&mut self) {
@@ -1409,6 +1542,7 @@ impl MubApp {
     fn current_breadcrumb(&self) -> String {
         match self.active_view {
             ActiveView::Instances => "~/instances".to_string(),
+            ActiveView::Collections => "~/collections".to_string(),
             ActiveView::InstanceDetail => {
                 let name = self
                     .profiles
@@ -1501,6 +1635,7 @@ impl MubApp {
 impl eframe::App for MubApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.sync_external_stores_if_changed();
         self.prune_expired_toasts(ctx);
         self.handle_dropped_files(ctx);
 
@@ -1740,6 +1875,7 @@ impl eframe::App for MubApp {
                     });
 
                 let inst_badge = format!("[{:02}]", self.profiles.profiles.len());
+                let col_badge = format!("[{:02}]", self.collections.collections.len());
                 let acct_badge = format!("[{:02}]", self.accounts.accounts.len());
                 let active_group = match self.active_view {
                     ActiveView::InstanceDetail => ActiveView::Instances,
@@ -1766,8 +1902,16 @@ impl eframe::App for MubApp {
                         palette.focus,
                     ),
                     (
-                        ActiveView::Discover,
+                        ActiveView::Collections,
                         "02",
+                        NavIcon::Collections,
+                        "COLLECTIONS",
+                        Some(col_badge.as_str()),
+                        palette.bot,
+                    ),
+                    (
+                        ActiveView::Discover,
+                        "03",
                         NavIcon::Discover,
                         "DISCOVER",
                         Some("MR+CF"),
@@ -1775,7 +1919,7 @@ impl eframe::App for MubApp {
                     ),
                     (
                         ActiveView::Accounts,
-                        "03",
+                        "04",
                         NavIcon::Accounts,
                         "ACCOUNTS",
                         Some(acct_badge.as_str()),
@@ -1783,7 +1927,7 @@ impl eframe::App for MubApp {
                     ),
                     (
                         ActiveView::Console,
-                        "04",
+                        "05",
                         NavIcon::Console,
                         "CONSOLE",
                         Some("LIVE"),
@@ -1791,7 +1935,7 @@ impl eframe::App for MubApp {
                     ),
                     (
                         ActiveView::Config,
-                        "05",
+                        "06",
                         NavIcon::Config,
                         "CONFIG",
                         config_badge,
@@ -2052,6 +2196,7 @@ impl eframe::App for MubApp {
             .frame(egui::Frame::NONE.inner_margin(Margin::same(16)))
             .show(ctx, |ui| match self.active_view {
                 ActiveView::Instances => self.ui_instances(ui, ctx, &palette),
+                ActiveView::Collections => self.ui_collections(ui, ctx, &palette),
                 ActiveView::InstanceDetail => {
                     let actions = self.instance_detail.ui(
                         ui,
@@ -2269,15 +2414,16 @@ impl MubApp {
 
                     let static_cmds: Vec<(&str, &str, Color32, u8)> = vec![
                         ("> go instances", "01 INSTANCES", palette.focus, 1),
+                        ("> go bot collections", "02 COLLECTIONS", palette.bot, 8),
                         (
                             "> discover modrinth + curseforge",
-                            "02 DISCOVER",
+                            "03 DISCOVER",
                             palette.meta,
                             2,
                         ),
-                        ("> go accounts", "03 ACCOUNTS", palette.player, 3),
-                        ("> go console", "04 CONSOLE", palette.mr, 4),
-                        ("> go config", "05 CONFIG", palette.meta, 5),
+                        ("> go accounts", "04 ACCOUNTS", palette.player, 3),
+                        ("> go console", "05 CONSOLE", palette.mr, 4),
+                        ("> go config", "06 CONFIG", palette.meta, 5),
                         ("> launch all bots (staggered)", "SWARM", palette.bot, 6),
                         ("> stop all active instances", "SIGKILL", palette.danger, 7),
                     ];
@@ -2296,6 +2442,7 @@ impl MubApp {
                                 5 => self.active_view = ActiveView::Config,
                                 6 => self.launch_all_bots(),
                                 7 => self.stop_all(),
+                                8 => self.active_view = ActiveView::Collections,
                                 _ => {}
                             }
                         }
@@ -2887,6 +3034,37 @@ impl MubApp {
         });
 
         ui.add_space(8.0);
+
+        if !self.collections.collections.is_empty() {
+            let mut quick_start_col: Option<String> = None;
+            theme::term_surface(ui, palette, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("BOT COLLECTIONS:")
+                            .monospace()
+                            .size(11.0)
+                            .strong()
+                            .color(palette.bot),
+                    );
+                    for col in &self.collections.collections {
+                        let lbl = format!("[▶▶] START ALL: {} ({})", col.name, col.profile_ids.len());
+                        if theme::term_button(ui, palette, &lbl, ButtonTone::Bot).clicked() {
+                            quick_start_col = Some(col.id.clone());
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::term_button(ui, palette, "MANAGE →", ButtonTone::Subtle).clicked() {
+                            self.active_view = ActiveView::Collections;
+                        }
+                    });
+                });
+            });
+            if let Some(cid) = quick_start_col {
+                self.launch_collection(&cid);
+            }
+            ui.add_space(8.0);
+        }
 
         if self.profiles.profiles.is_empty() {
             theme::term_surface(ui, palette, |ui| {
@@ -4174,8 +4352,617 @@ impl MubApp {
             });
 
             ui.add_space(12.0);
+            self.render_mcp_config_card(ui, palette);
+
+            ui.add_space(12.0);
             self.render_app_updates_card(ui, ctx, palette);
         });
+    }
+
+    fn render_mcp_config_card(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        let exe_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(if cfg!(windows) { "mub.exe" } else { "mub" })))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "mub".to_string());
+
+        let escaped = exe_path.replace('\\', "\\\\");
+        let snippet = format!(
+            "{{\n  \"mcpServers\": {{\n    \"modsundbots\": {{\n      \"command\": \"{escaped}\",\n      \"args\": [\"mcp\"]\n    }}\n  }}\n}}"
+        );
+
+        theme::term_surface(ui, palette, |ui| {
+            ui.set_width(ui.available_width());
+            theme::section_header(ui, palette, "MCP SERVER (LLM AUTOMATION)", palette.focus);
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Control ModsUndBots from Claude, Cursor, Antigravity, or any MCP client (`mub mcp` over stdio). Changes sync live into the GUI.",
+                )
+                .monospace()
+                .size(11.0)
+                .color(palette.ink_muted),
+            );
+            ui.add_space(6.0);
+            theme::term_raised(ui, palette, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(&snippet)
+                        .monospace()
+                        .size(11.0)
+                        .color(palette.ink),
+                );
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if theme::term_button(ui, palette, "COPY MCP CONFIG JSON", ButtonTone::Focus)
+                    .clicked()
+                {
+                    ui.ctx().copy_text(snippet);
+                    self.push_toast(
+                        ToastTone::Focus,
+                        "Copied MCP server config JSON to clipboard",
+                    );
+                }
+            });
+        });
+    }
+
+    fn ui_collections(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, palette: &Palette) {
+        // Header
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("▸ BOT COLLECTIONS")
+                            .monospace()
+                            .size(16.0)
+                            .strong()
+                            .color(palette.bot),
+                    );
+                });
+                ui.label(
+                    RichText::new(
+                        "Group bot instances into named collections with one-click 'Start All' staggered launching.",
+                    )
+                    .monospace()
+                    .size(11.5)
+                    .color(palette.ink_muted),
+                );
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::term_button(ui, palette, "[+] NEW COLLECTION", ButtonTone::Cta).clicked()
+                {
+                    self.show_new_collection = !self.show_new_collection;
+                }
+            });
+        });
+
+        theme::term_divider(ui, palette);
+        ui.add_space(4.0);
+
+        // Inline New Collection drawer
+        if self.show_new_collection {
+            theme::term_raised(ui, palette, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    theme::section_header(ui, palette, "CREATE BOT COLLECTION", palette.bot);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::term_button(ui, palette, "CLOSE", ButtonTone::Subtle).clicked() {
+                            self.show_new_collection = false;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                egui::Grid::new("new_col_grid")
+                    .num_columns(2)
+                    .spacing([14.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("COLLECTION NAME")
+                                .monospace()
+                                .size(11.0)
+                                .color(palette.ink_muted),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_col_name)
+                                .hint_text("e.g. FarmSquad")
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+
+                        ui.label(
+                            RichText::new("DESCRIPTION")
+                                .monospace()
+                                .size(11.0)
+                                .color(palette.ink_muted),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_col_desc)
+                                .hint_text("Optional notes...")
+                                .desired_width(360.0),
+                        );
+                        ui.end_row();
+
+                        ui.label(
+                            RichText::new("STAGGER DELAY (MS)")
+                                .monospace()
+                                .size(11.0)
+                                .color(palette.ink_muted),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_col_stagger)
+                                .hint_text(&format!(
+                                    "default ({} ms)",
+                                    self.settings.batch_launch_stagger_ms
+                                ))
+                                .desired_width(180.0),
+                        );
+                        ui.end_row();
+
+                        ui.label(
+                            RichText::new("INITIAL MEMBERS")
+                                .monospace()
+                                .size(11.0)
+                                .color(palette.ink_muted),
+                        );
+                        ui.checkbox(
+                            &mut self.new_col_include_all_bots,
+                            RichText::new("Auto-add all existing Bot profiles")
+                                .monospace()
+                                .size(11.5)
+                                .color(palette.ink),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if theme::term_button(ui, palette, "CREATE COLLECTION", ButtonTone::Bot)
+                        .clicked()
+                    {
+                        let name = self.new_col_name.trim().to_string();
+                        if name.is_empty() {
+                            self.push_toast(ToastTone::Danger, "Collection name cannot be empty");
+                        } else if self.collections.find_by_name(&name).is_some() {
+                            self.push_toast(
+                                ToastTone::Danger,
+                                format!("Collection '{name}' already exists"),
+                            );
+                        } else {
+                            let mut col = BotCollection::new(&name);
+                            col.description = self.new_col_desc.trim().to_string();
+                            if let Ok(ms) = self.new_col_stagger.trim().parse::<u64>() {
+                                col.stagger_ms = Some(ms);
+                            }
+                            if self.new_col_include_all_bots {
+                                for p in &self.profiles.profiles {
+                                    if p.kind == ProfileKind::Bot {
+                                        col.add_profile(&p.id);
+                                    }
+                                }
+                            }
+                            self.collections.upsert(col);
+                            let _ = self.collections.save(&self.paths.collections_file());
+                            self.collections_mtime = file_mtime(&self.paths.collections_file());
+                            self.new_col_name.clear();
+                            self.new_col_desc.clear();
+                            self.new_col_stagger.clear();
+                            self.show_new_collection = false;
+                            self.push_toast(
+                                ToastTone::Bot,
+                                format!("Created collection '{name}'"),
+                            );
+                        }
+                    }
+                });
+            });
+            ui.add_space(8.0);
+        }
+
+        if self.collections.collections.is_empty() {
+            theme::term_surface(ui, palette, |ui| {
+                ui.set_width(ui.available_width());
+                ui.vertical_centered(|ui| {
+                    ui.add_space(28.0);
+                    ui.label(
+                        RichText::new("NO BOT COLLECTIONS YET")
+                            .monospace()
+                            .size(14.0)
+                            .strong()
+                            .color(palette.ink),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Click '[+] NEW COLLECTION' above (or ask an LLM via MCP) to group bots for one-click 'Start All'.",
+                        )
+                        .monospace()
+                        .size(11.5)
+                        .color(palette.ink_muted),
+                    );
+                    ui.add_space(28.0);
+                });
+            });
+            return;
+        }
+
+        let mut start_col_id: Option<String> = None;
+        let mut stop_col_id: Option<String> = None;
+        let mut delete_col_id: Option<String> = None;
+        let mut launch_single: Option<Profile> = None;
+        let mut stop_single: Option<String> = None;
+        let mut open_logs: Option<String> = None;
+        let mut toggle_member: Option<(String, String, bool)> = None;
+        let mut add_all_bots_to: Option<String> = None;
+        let mut save_edit_id: Option<String> = None;
+
+        let cols_snapshot = self.collections.collections.clone();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for col in &cols_snapshot {
+                let running_in_col = col
+                    .profile_ids
+                    .iter()
+                    .filter(|pid| {
+                        matches!(
+                            self.statuses.get(*pid).map(|s| &s.state),
+                            Some(InstanceState::Running | InstanceState::Preparing)
+                        )
+                    })
+                    .count();
+                let is_editing = self.editing_collection_id.as_deref() == Some(col.id.as_str());
+                let stagger_eff = col.stagger_ms.unwrap_or(self.settings.batch_launch_stagger_ms);
+
+                theme::term_surface(ui, palette, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(&col.name)
+                                        .monospace()
+                                        .size(14.5)
+                                        .strong()
+                                        .color(palette.ink),
+                                );
+                                theme::term_badge(
+                                    ui,
+                                    &format!("{} BOTS", col.profile_ids.len()),
+                                    palette.bot,
+                                    palette.bot_bg,
+                                );
+                                if running_in_col > 0 {
+                                    theme::term_badge(
+                                        ui,
+                                        &format!("{running_in_col} RUNNING"),
+                                        palette.mr,
+                                        palette.mr_bg,
+                                    );
+                                }
+                                ui.label(
+                                    RichText::new(format!("stagger: {stagger_eff}ms"))
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(palette.ink_muted),
+                                );
+                            });
+                            if !col.description.trim().is_empty() {
+                                ui.label(
+                                    RichText::new(&col.description)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(palette.ink_muted),
+                                );
+                            }
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if theme::term_button(ui, palette, "[×] DELETE", ButtonTone::Danger)
+                                .clicked()
+                            {
+                                delete_col_id = Some(col.id.clone());
+                            }
+                            if theme::term_button(
+                                ui,
+                                palette,
+                                if is_editing { "DONE" } else { "[✎] EDIT" },
+                                if is_editing {
+                                    ButtonTone::Focus
+                                } else {
+                                    ButtonTone::Secondary
+                                },
+                            )
+                            .clicked()
+                            {
+                                if is_editing {
+                                    self.editing_collection_id = None;
+                                } else {
+                                    self.editing_collection_id = Some(col.id.clone());
+                                    self.edit_col_name = col.name.clone();
+                                    self.edit_col_desc = col.description.clone();
+                                    self.edit_col_stagger = col
+                                        .stagger_ms
+                                        .map(|v| v.to_string())
+                                        .unwrap_or_default();
+                                }
+                            }
+                            if running_in_col > 0
+                                && theme::term_button(
+                                    ui,
+                                    palette,
+                                    "[■] STOP ALL",
+                                    ButtonTone::Danger,
+                                )
+                                .clicked()
+                            {
+                                stop_col_id = Some(col.id.clone());
+                            }
+                            if theme::term_button(ui, palette, "[▶▶] START ALL", ButtonTone::Bot)
+                                .clicked()
+                            {
+                                start_col_id = Some(col.id.clone());
+                            }
+                        });
+                    });
+
+                    if is_editing {
+                        ui.add_space(8.0);
+                        theme::term_raised(ui, palette, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("NAME:")
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(palette.ink_muted),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.edit_col_name)
+                                        .desired_width(160.0),
+                                );
+                                ui.label(
+                                    RichText::new("DESC:")
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(palette.ink_muted),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.edit_col_desc)
+                                        .desired_width(200.0),
+                                );
+                                ui.label(
+                                    RichText::new("STAGGER MS:")
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(palette.ink_muted),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.edit_col_stagger)
+                                        .hint_text("default")
+                                        .desired_width(70.0),
+                                );
+                                if theme::term_button(ui, palette, "SAVE", ButtonTone::Cta)
+                                    .clicked()
+                                {
+                                    save_edit_id = Some(col.id.clone());
+                                }
+                                if theme::term_button(
+                                    ui,
+                                    palette,
+                                    "+ ALL BOTS",
+                                    ButtonTone::Bot,
+                                )
+                                .clicked()
+                                {
+                                    add_all_bots_to = Some(col.id.clone());
+                                }
+                            });
+
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("MEMBERS (CLICK TO TOGGLE):")
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(palette.ink_muted),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                for p in &self.profiles.profiles {
+                                    let included = col.profile_ids.iter().any(|id| id == &p.id);
+                                    let acc = p
+                                        .account_id
+                                        .as_deref()
+                                        .and_then(|id| self.accounts.get(id))
+                                        .map(|a| a.username.as_str())
+                                        .unwrap_or("UNASSIGNED");
+                                    let lbl = if included {
+                                        format!("[✓] {} ({acc})", p.name)
+                                    } else {
+                                        format!("[ ] {} ({acc})", p.name)
+                                    };
+                                    let tone = if included {
+                                        ButtonTone::Bot
+                                    } else {
+                                        ButtonTone::Subtle
+                                    };
+                                    if theme::term_button(ui, palette, &lbl, tone).clicked() {
+                                        toggle_member =
+                                            Some((col.id.clone(), p.id.clone(), !included));
+                                    }
+                                }
+                            });
+                        });
+                    }
+
+                    if !col.profile_ids.is_empty() {
+                        ui.add_space(6.0);
+                        for pid in &col.profile_ids {
+                            let Some(p) = self.profiles.get(pid) else {
+                                continue;
+                            };
+                            let acc = p
+                                .account_id
+                                .as_deref()
+                                .and_then(|id| self.accounts.get(id))
+                                .map(|a| a.username.as_str())
+                                .unwrap_or("UNASSIGNED");
+                            let st = self.statuses.get(&p.id);
+                            let active = matches!(
+                                st.map(|s| &s.state),
+                                Some(InstanceState::Running | InstanceState::Preparing)
+                            );
+                            let state_str = match st.map(|s| &s.state) {
+                                Some(InstanceState::Preparing) => "PREPARING",
+                                Some(InstanceState::Running) => "RUNNING",
+                                Some(InstanceState::Failed { .. }) => "FAILED",
+                                _ => "IDLE",
+                            };
+
+                            theme::term_row(ui, palette, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(&p.name)
+                                            .monospace()
+                                            .size(12.0)
+                                            .strong()
+                                            .color(palette.ink),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("· {acc}"))
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(if acc == "UNASSIGNED" {
+                                                palette.danger
+                                            } else {
+                                                palette.player
+                                            }),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "· {} · {}",
+                                            p.mc_version, p.mod_loader
+                                        ))
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(palette.ink_muted),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if theme::term_button(
+                                                ui,
+                                                palette,
+                                                "LOGS",
+                                                ButtonTone::Subtle,
+                                            )
+                                            .clicked()
+                                            {
+                                                open_logs = Some(p.id.clone());
+                                            }
+                                            if active {
+                                                if theme::term_button(
+                                                    ui,
+                                                    palette,
+                                                    "[■] STOP",
+                                                    ButtonTone::Danger,
+                                                )
+                                                .clicked()
+                                                {
+                                                    stop_single = Some(p.id.clone());
+                                                }
+                                            } else if theme::term_button(
+                                                ui,
+                                                palette,
+                                                "[▶] START",
+                                                ButtonTone::Focus,
+                                            )
+                                            .clicked()
+                                            {
+                                                launch_single = Some(p.clone());
+                                            }
+                                            ui.label(
+                                                RichText::new(state_str)
+                                                    .monospace()
+                                                    .size(10.5)
+                                                    .color(if active {
+                                                        palette.mr
+                                                    } else {
+                                                        palette.ink_muted
+                                                    }),
+                                            );
+                                        },
+                                    );
+                                });
+                            });
+                            ui.add_space(2.0);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        });
+
+        if let Some(cid) = start_col_id {
+            self.launch_collection(&cid);
+        }
+        if let Some(cid) = stop_col_id {
+            self.stop_collection(&cid);
+        }
+        if let Some(cid) = delete_col_id {
+            self.collections.remove(&cid);
+            let _ = self.collections.save(&self.paths.collections_file());
+            self.collections_mtime = file_mtime(&self.paths.collections_file());
+            if self.editing_collection_id.as_deref() == Some(cid.as_str()) {
+                self.editing_collection_id = None;
+            }
+        }
+        if let Some(p) = launch_single {
+            self.launch_profiles(vec![p]);
+        }
+        if let Some(pid) = stop_single {
+            self.stop_profile(pid);
+        }
+        if let Some(pid) = open_logs {
+            self.console_profile_id = Some(pid);
+            self.active_view = ActiveView::Console;
+        }
+        if let Some((cid, pid, add)) = toggle_member {
+            if let Some(c) = self.collections.get_mut(&cid) {
+                if add {
+                    c.add_profile(pid);
+                } else {
+                    c.remove_profile(&pid);
+                }
+            }
+            let _ = self.collections.save(&self.paths.collections_file());
+            self.collections_mtime = file_mtime(&self.paths.collections_file());
+        }
+        if let Some(cid) = add_all_bots_to {
+            if let Some(c) = self.collections.get_mut(&cid) {
+                for p in &self.profiles.profiles {
+                    if p.kind == ProfileKind::Bot {
+                        c.add_profile(&p.id);
+                    }
+                }
+            }
+            let _ = self.collections.save(&self.paths.collections_file());
+            self.collections_mtime = file_mtime(&self.paths.collections_file());
+        }
+        if let Some(cid) = save_edit_id {
+            if let Some(c) = self.collections.get_mut(&cid) {
+                let n = self.edit_col_name.trim();
+                if !n.is_empty() {
+                    c.name = n.to_string();
+                }
+                c.description = self.edit_col_desc.trim().to_string();
+                c.stagger_ms = self.edit_col_stagger.trim().parse::<u64>().ok();
+            }
+            let _ = self.collections.save(&self.paths.collections_file());
+            self.collections_mtime = file_mtime(&self.paths.collections_file());
+            self.push_toast(ToastTone::Focus, "Collection updated");
+        }
     }
 
     fn trigger_app_update_check(&mut self, ctx: &egui::Context, silent: bool) {
@@ -4400,6 +5187,10 @@ fn cmd_row(ui: &mut egui::Ui, palette: &Palette, label: &str, tag: &str, tag_col
         clicked = true;
     }
     clicked
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 fn main() -> eframe::Result<()> {

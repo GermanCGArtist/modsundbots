@@ -35,6 +35,10 @@ impl AppPaths {
         self.root.join("profiles.json")
     }
 
+    pub fn collections_file(&self) -> PathBuf {
+        self.root.join("collections.json")
+    }
+
     pub fn settings_file(&self) -> PathBuf {
         self.root.join("settings.json")
     }

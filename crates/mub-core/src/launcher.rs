@@ -169,57 +169,15 @@ impl InstanceManager {
             });
         };
 
-        let vm = VersionManager::new();
-        let prepared: Result<PreparedVersion> = match &profile.mod_loader {
-            ModLoader::Vanilla => {
-                vm.prepare_vanilla(
-                    paths,
-                    &profile.mc_version,
-                    &natives_dir,
-                    settings.max_concurrent_downloads,
-                    on_progress,
-                )
-                .await
-            }
-            ModLoader::Fabric { loader_version } => {
-                vm.prepare_fabric(
-                    paths,
-                    &profile.mc_version,
-                    loader_version,
-                    &natives_dir,
-                    settings.max_concurrent_downloads,
-                    on_progress,
-                )
-                .await
-            }
-            ModLoader::Quilt { loader_version } => {
-                vm.prepare_quilt(
-                    paths,
-                    &profile.mc_version,
-                    loader_version,
-                    &natives_dir,
-                    settings.max_concurrent_downloads,
-                    on_progress,
-                )
-                .await
-            }
-            ModLoader::NeoForge { loader_version } => {
-                vm.prepare_neoforge(
-                    paths,
-                    &profile.mc_version,
-                    loader_version,
-                    &natives_dir,
-                    settings.max_concurrent_downloads,
-                    &java_bin,
-                    on_progress,
-                )
-                .await
-            }
-            ModLoader::Forge { loader_version } => Err(MubError::Launch(format!(
-                "Forge ({loader_version}) automated installer is not supported yet; consider NeoForge, Fabric, or Quilt, or install Forge manually."
-            ))),
-        };
-        let prepared = match prepared {
+        let prepared = match prepare_profile_version(
+            paths,
+            settings,
+            profile,
+            &java_bin,
+            on_progress,
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 self.mark_failed(&profile.id, e.to_string()).await;
@@ -350,8 +308,22 @@ impl InstanceManager {
         settings: &LauncherSettings,
         items: Vec<(Profile, Account)>,
     ) -> Vec<(String, Result<()>)> {
+        self.launch_batch_with_stagger(paths, settings, items, None)
+            .await
+    }
+
+    /// Launch multiple profiles in sequence with an optional stagger delay override.
+    pub async fn launch_batch_with_stagger(
+        &self,
+        paths: &AppPaths,
+        settings: &LauncherSettings,
+        items: Vec<(Profile, Account)>,
+        stagger_ms_override: Option<u64>,
+    ) -> Vec<(String, Result<()>)> {
         let mut results = Vec::with_capacity(items.len());
-        let stagger = Duration::from_millis(settings.batch_launch_stagger_ms);
+        let stagger = Duration::from_millis(
+            stagger_ms_override.unwrap_or(settings.batch_launch_stagger_ms),
+        );
 
         for (idx, (profile, account)) in items.into_iter().enumerate() {
             if idx > 0 && !stagger.is_zero() {
@@ -465,6 +437,74 @@ impl InstanceManager {
                 }
             }
         });
+    }
+}
+
+/// Download and prepare a profile's Minecraft version, libraries, assets,
+/// natives, and mod loader without spawning the JVM.
+pub async fn prepare_profile_version<F>(
+    paths: &AppPaths,
+    settings: &LauncherSettings,
+    profile: &Profile,
+    java_bin: &str,
+    on_progress: F,
+) -> Result<PreparedVersion>
+where
+    F: Fn(String) + Send + Sync + Clone + 'static,
+{
+    let natives_dir = paths.natives_dir(&profile.id);
+    let game_dir = paths.instance_dir(&profile.id);
+    std::fs::create_dir_all(&game_dir)?;
+
+    let vm = VersionManager::new();
+    match &profile.mod_loader {
+        ModLoader::Vanilla => {
+            vm.prepare_vanilla(
+                paths,
+                &profile.mc_version,
+                &natives_dir,
+                settings.max_concurrent_downloads,
+                on_progress,
+            )
+            .await
+        }
+        ModLoader::Fabric { loader_version } => {
+            vm.prepare_fabric(
+                paths,
+                &profile.mc_version,
+                loader_version,
+                &natives_dir,
+                settings.max_concurrent_downloads,
+                on_progress,
+            )
+            .await
+        }
+        ModLoader::Quilt { loader_version } => {
+            vm.prepare_quilt(
+                paths,
+                &profile.mc_version,
+                loader_version,
+                &natives_dir,
+                settings.max_concurrent_downloads,
+                on_progress,
+            )
+            .await
+        }
+        ModLoader::NeoForge { loader_version } => {
+            vm.prepare_neoforge(
+                paths,
+                &profile.mc_version,
+                loader_version,
+                &natives_dir,
+                settings.max_concurrent_downloads,
+                java_bin,
+                on_progress,
+            )
+            .await
+        }
+        ModLoader::Forge { loader_version } => Err(MubError::Launch(format!(
+            "Forge ({loader_version}) automated installer is not supported yet; consider NeoForge, Fabric, or Quilt, or install Forge manually."
+        ))),
     }
 }
 

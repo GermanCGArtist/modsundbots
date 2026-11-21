@@ -1,14 +1,17 @@
+mod mcp;
+
 use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use mub_core::{
-    Account, AccountRole, AccountStore, AppPaths, CatalogClient, CatalogSort, CatalogVersion,
-    ContentKind, ContentSource, CurseForgeClient, InstanceManager, LauncherSettings, ModLoader,
-    MsaAuthClient, MubError, Profile, ProfileKind, ProfileStore, SourceFilter,
-    detect_java_installations, export_mrpack, import_curseforge_pack, import_mrpack,
-    install_modpack_from_catalog, list_installed_content, remove_installed_content,
+    Account, AccountRole, AccountStore, AppPaths, BotCollection, BotCollectionStore,
+    CatalogClient, CatalogSort, CatalogVersion, ContentKind, ContentSource, CurseForgeClient,
+    InstanceManager, LauncherSettings, ModLoader, MsaAuthClient, MubError, Profile, ProfileKind,
+    ProfileStore, SourceFilter, detect_java_installations, export_mrpack, import_curseforge_pack,
+    import_mrpack, install_modpack_from_catalog, list_installed_content, prepare_profile_version,
+    remove_installed_content, resolve_java_for_mc,
 };
 
 #[derive(Parser)]
@@ -56,6 +59,13 @@ enum Commands {
         #[command(subcommand)]
         action: JavaAction,
     },
+    /// Manage bot collections (grouped instances with Start All)
+    Collection {
+        #[command(subcommand)]
+        action: CollectionAction,
+    },
+    /// Run an MCP (Model Context Protocol) JSON-RPC 2.0 server over stdio
+    Mcp,
     /// Check for and install ModsUndBots updates from GitHub Releases
     Update {
         /// Only check if an update is available without installing
@@ -134,6 +144,47 @@ enum PackAction {
         version: String,
         #[arg(long)]
         summary: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CollectionAction {
+    /// List all bot collections
+    List,
+    /// Create a new bot collection
+    Create {
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long)]
+        stagger_ms: Option<u64>,
+        /// Profile IDs or names to add initially
+        #[arg(long)]
+        profiles: Vec<String>,
+    },
+    /// Add profiles to a bot collection
+    Add {
+        collection: String,
+        #[arg(required = true)]
+        profiles: Vec<String>,
+    },
+    /// Remove profiles from a bot collection
+    Remove {
+        collection: String,
+        #[arg(required = true)]
+        profiles: Vec<String>,
+    },
+    /// Delete a bot collection
+    Delete {
+        collection: String,
+    },
+    /// Prepare (download MC/loader/assets) for all profiles in a bot collection
+    Prepare {
+        collection: String,
+    },
+    /// Start all profiles in a bot collection and wait until they exit
+    Start {
+        collection: String,
     },
 }
 
@@ -269,9 +320,14 @@ enum ProfileAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     mub_core::cleanup_old_update_files();
     let cli = Cli::parse();
+    if matches!(cli.command, Commands::Mcp) {
+        return mcp::run_mcp_server().await;
+    }
     let paths = AppPaths::default_root()?;
     paths.ensure_dirs()?;
     let settings = LauncherSettings::load(&paths.settings_file())?;
@@ -312,6 +368,8 @@ async fn main() -> Result<()> {
         Commands::Mods { action } => handle_mods(action, &paths, &settings).await?,
         Commands::Pack { action } => handle_pack(action, &paths, &settings).await?,
         Commands::Java { action } => handle_java(action),
+        Commands::Collection { action } => handle_collection(action, &paths, &settings).await?,
+        Commands::Mcp => unreachable!(),
         Commands::Update { check, token } => handle_update(check, token, &settings).await?,
     }
 
@@ -1044,4 +1102,165 @@ fn handle_java(action: JavaAction) {
             }
         }
     }
+}
+
+async fn handle_collection(
+    action: CollectionAction,
+    paths: &AppPaths,
+    settings: &LauncherSettings,
+) -> Result<()> {
+    let mut store = BotCollectionStore::load(&paths.collections_file())?;
+    let prof_store = ProfileStore::load(&paths.profiles_file())?;
+
+    match action {
+        CollectionAction::List => {
+            if store.collections.is_empty() {
+                println!("No bot collections configured.");
+            } else {
+                for c in &store.collections {
+                    println!(
+                        "{} | {} | {} profile(s) | stagger={}ms",
+                        c.id,
+                        c.name,
+                        c.profile_ids.len(),
+                        c.stagger_ms.unwrap_or(settings.batch_launch_stagger_ms)
+                    );
+                }
+            }
+        }
+        CollectionAction::Create {
+            name,
+            description,
+            stagger_ms,
+            profiles,
+        } => {
+            if store.find_by_name(&name).is_some() {
+                bail!("Collection '{name}' already exists");
+            }
+            let mut col = BotCollection::new(&name);
+            col.description = description;
+            col.stagger_ms = stagger_ms;
+            for q in profiles {
+                let p = prof_store
+                    .get(&q)
+                    .or_else(|| prof_store.find_by_name(&q))
+                    .with_context(|| format!("Profile '{q}' not found"))?;
+                col.add_profile(&p.id);
+            }
+            println!("Created collection '{}' ({})", col.name, col.id);
+            store.upsert(col);
+            store.save(&paths.collections_file())?;
+        }
+        CollectionAction::Add {
+            collection,
+            profiles,
+        } => {
+            let id = store
+                .resolve(&collection)
+                .with_context(|| format!("Collection '{collection}' not found"))?
+                .id
+                .clone();
+            let col = store.get_mut(&id).unwrap();
+            for q in profiles {
+                let p = prof_store
+                    .get(&q)
+                    .or_else(|| prof_store.find_by_name(&q))
+                    .with_context(|| format!("Profile '{q}' not found"))?;
+                col.add_profile(&p.id);
+            }
+            println!(
+                "Updated collection '{}' ({} profiles)",
+                col.name,
+                col.profile_ids.len()
+            );
+            store.save(&paths.collections_file())?;
+        }
+        CollectionAction::Remove {
+            collection,
+            profiles,
+        } => {
+            let id = store
+                .resolve(&collection)
+                .with_context(|| format!("Collection '{collection}' not found"))?
+                .id
+                .clone();
+            let col = store.get_mut(&id).unwrap();
+            for q in profiles {
+                if let Some(p) = prof_store.get(&q).or_else(|| prof_store.find_by_name(&q)) {
+                    col.remove_profile(&p.id);
+                } else {
+                    col.remove_profile(&q);
+                }
+            }
+            println!(
+                "Updated collection '{}' ({} profiles)",
+                col.name,
+                col.profile_ids.len()
+            );
+            store.save(&paths.collections_file())?;
+        }
+        CollectionAction::Delete { collection } => {
+            let id = store
+                .resolve(&collection)
+                .with_context(|| format!("Collection '{collection}' not found"))?
+                .id
+                .clone();
+            let removed = store.remove(&id).unwrap();
+            store.save(&paths.collections_file())?;
+            println!("Deleted collection '{}'", removed.name);
+        }
+        CollectionAction::Prepare { collection } => {
+            let col = store
+                .resolve(&collection)
+                .with_context(|| format!("Collection '{collection}' not found"))?;
+            for pid in &col.profile_ids {
+                if let Some(p) = prof_store.get(pid) {
+                    println!("Preparing '{}'...", p.name);
+                    let java_bin = resolve_java_for_mc(
+                        p.java_path.as_deref(),
+                        &settings.default_java_path,
+                        &p.mc_version,
+                    );
+                    let pname = p.name.clone();
+                    prepare_profile_version(paths, settings, p, &java_bin, move |msg| {
+                        println!("  [{pname}] {msg}");
+                    })
+                    .await?;
+                }
+            }
+            println!("Collection '{}' prepared.", col.name);
+        }
+        CollectionAction::Start { collection } => {
+            let col_id = store
+                .resolve(&collection)
+                .with_context(|| format!("Collection '{collection}' not found"))?
+                .id
+                .clone();
+            let col = store.get(&col_id).unwrap().clone();
+            let mut acc_store = AccountStore::load(&paths.accounts_file())?;
+            let mut to_launch = Vec::new();
+            for pid in &col.profile_ids {
+                if let Some(p) = prof_store.get(pid) {
+                    let acc = resolve_account(p, &mut acc_store, settings, paths).await?;
+                    to_launch.push((p.clone(), acc));
+                }
+            }
+            if to_launch.is_empty() {
+                println!("Collection '{}' has no profiles to launch.", col.name);
+                return Ok(());
+            }
+            if let Some(c) = store.get_mut(&col_id) {
+                c.last_started_at = Some(chrono::Utc::now());
+            }
+            store.save(&paths.collections_file())?;
+
+            let effective_settings = LauncherSettings {
+                batch_launch_stagger_ms: col.stagger_ms.unwrap_or(settings.batch_launch_stagger_ms),
+                ..settings.clone()
+            };
+            run_and_wait(paths, &effective_settings, to_launch).await?;
+        }
+    }
+
+    Ok(())
 }
