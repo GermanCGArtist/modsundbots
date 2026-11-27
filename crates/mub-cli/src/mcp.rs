@@ -393,7 +393,8 @@ fn tool_definitions() -> Vec<Value> {
                     "memory_max_mb": { "type": "integer" },
                     "java_path": { "type": "string" },
                     "jvm_args": { "type": "array", "items": { "type": "string" } },
-                    "tags": { "type": "array", "items": { "type": "string" } }
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "hide_window": { "type": ["boolean", "null"], "description": "Hide the game window on launch (null = default: bots hidden, players shown)" }
                 },
                 "required": ["profile"]
             }
@@ -592,6 +593,18 @@ fn tool_definitions() -> Vec<Value> {
                     "profile": { "type": "string", "description": "Profile ID, name, or 'all'" }
                 },
                 "required": ["profile"]
+            }
+        }),
+        json!({
+            "name": "set_window_hidden",
+            "description": "Hide or show the game window of a running instance (started by any mub process). Showing brings it to the front.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": { "type": "string", "description": "Profile ID or name" },
+                    "hidden": { "type": "boolean" }
+                },
+                "required": ["profile", "hidden"]
             }
         }),
         json!({
@@ -926,6 +939,9 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
                 } else {
                     Some(qc.to_string())
                 };
+            }
+            if let Some(v) = args.get("hide_window") {
+                p.hide_window = v.as_bool();
             }
             if let Some(min) = args.get("memory_min_mb").and_then(|v| v.as_u64()) {
                 p.memory_min_mb = min as u32;
@@ -1529,6 +1545,33 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
                 state.manager.stop_profile(&p.id).await?;
                 Ok(json!({ "stopped": p.name }))
             }
+        }
+        "set_window_hidden" => {
+            let target = req_str(&args, "profile")?;
+            let hidden = args
+                .get("hidden")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| anyhow::anyhow!("'hidden' (boolean) is required"))?;
+            let profiles = state.load_profiles()?;
+            let p = resolve_profile(&profiles, &target)?;
+            let paths = mub_core::AppPaths::default_root()?;
+            let rec = mub_core::RunningStore::alive(&paths.running_file())
+                .into_iter()
+                .find(|r| r.profile_id == p.id)
+                .ok_or_else(|| anyhow::anyhow!("'{}' is not running", p.name))?;
+            // Keep this session's keeper in sync, then act on the window directly (works for
+            // instances started by the GUI or another mub process too).
+            state.manager.set_window_hidden(&p.id, hidden, !hidden).await;
+            let n = tokio::task::spawn_blocking(move || {
+                if hidden {
+                    mub_core::window::hide_pid(rec.pid)
+                } else {
+                    mub_core::window::show_pid(rec.pid, true)
+                }
+            })
+            .await
+            .unwrap_or(0);
+            Ok(json!({ "profile": p.name, "hidden": hidden, "windows": n }))
         }
         "list_running_instances" => {
             let list = state.manager.list_statuses().await;

@@ -13,6 +13,8 @@ use crate::error::{MubError, Result};
 use crate::mojang::{PreparedVersion, VersionManager};
 use crate::paths::AppPaths;
 use crate::profile::{LauncherSettings, ModLoader, Profile};
+use crate::running::{RunningRecord, RunningStore};
+use crate::window;
 
 const MAX_LOG_LINES: usize = 2000;
 
@@ -35,6 +37,10 @@ pub struct InstanceStatus {
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub logs: VecDeque<String>,
+    /// The game window should be hidden (parked off-screen, see `window`).
+    pub hide_window: bool,
+    /// Re-attached after a mub restart: no stdout capture, logs are tailed from latest.log.
+    pub adopted: bool,
 }
 
 impl InstanceStatus {
@@ -47,6 +53,13 @@ impl InstanceStatus {
 struct RunningEntry {
     status: InstanceStatus,
     child: Option<Child>,
+}
+
+fn push_log(status: &mut InstanceStatus, line: String) {
+    if status.logs.len() >= MAX_LOG_LINES {
+        status.logs.pop_front();
+    }
+    status.logs.push_back(line);
 }
 
 /// Manages many concurrent Minecraft JVM instances (player & bot accounts).
@@ -125,6 +138,8 @@ impl InstanceManager {
                         started_at: Utc::now(),
                         ended_at: None,
                         logs: VecDeque::with_capacity(MAX_LOG_LINES),
+                        hide_window: profile.hides_window(),
+                        adopted: false,
                     },
                     child: None,
                 },
@@ -274,6 +289,16 @@ impl InstanceManager {
             }
         }
 
+        if profile.hides_window() {
+            // Hidden bots should drop their frame rate when nobody plays them (vanilla AFK limiter:
+            // 30 fps after 1 min, 10 fps after 10 min without real input). AFK is the default; only
+            // repair a profile that was switched to "minimized".
+            ensure_option(&game_dir.join("options.txt"), "inactivityFpsLimit", "\"afk\"");
+            // The window shows for a moment before it is parked: never let it take the focus.
+            cmd.env("SDL_WINDOW_ACTIVATE_WHEN_SHOWN", "0");
+            cmd.env("SDL_WINDOW_ACTIVATE_WHEN_RAISED", "0");
+        }
+
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = match cmd.spawn() {
@@ -314,8 +339,23 @@ impl InstanceManager {
             self.spawn_log_reader(profile.id.clone(), err);
         }
 
+        if let Some(p) = pid {
+            RunningStore::upsert(
+                &paths.running_file(),
+                RunningRecord {
+                    profile_id: profile.id.clone(),
+                    profile_name: profile.name.clone(),
+                    account_name: account.username.clone(),
+                    pid: p,
+                    start_time: window::process_start_time(p).unwrap_or(0),
+                    started_at: Utc::now(),
+                },
+            );
+            self.spawn_window_keeper(profile.id.clone(), p, false);
+        }
+
         // Spawn exit watcher
-        self.spawn_exit_watcher(profile.id.clone());
+        self.spawn_exit_watcher(profile.id.clone(), pid, paths.running_file());
 
         Ok(())
     }
@@ -377,6 +417,15 @@ impl InstanceManager {
             entry.status.state = InstanceState::Stopped { exit_code: None };
             entry.status.ended_at = Some(Utc::now());
             entry.status.pid = None;
+        } else if entry.status.adopted
+            && entry.status.state == InstanceState::Running
+            && let Some(pid) = entry.status.pid
+        {
+            // Re-attached instance: no Child handle, end the process directly.
+            window::terminate_process(pid);
+            entry.status.state = InstanceState::Stopped { exit_code: None };
+            entry.status.ended_at = Some(Utc::now());
+            entry.status.pid = None;
         }
         Ok(())
     }
@@ -391,6 +440,192 @@ impl InstanceManager {
             let _ = self.stop_profile(&id).await;
         }
         Ok(())
+    }
+
+    /// Hide or show an instance's game window; with `focus`, showing brings it to the front so you
+    /// can play. Returns false when the instance has no window (yet).
+    pub async fn set_window_hidden(&self, profile_id: &str, hidden: bool, focus: bool) -> bool {
+        let pid = {
+            let mut map = self.inner.write().await;
+            let Some(entry) = map.get_mut(profile_id) else {
+                return false;
+            };
+            entry.status.hide_window = hidden;
+            entry.status.pid
+        };
+        let Some(pid) = pid else { return false };
+        tokio::task::spawn_blocking(move || {
+            if hidden {
+                window::hide_pid(pid) > 0
+            } else {
+                window::show_pid(pid, focus) > 0
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Re-attach to instances recorded in `running.json` that are still alive but not tracked here
+    /// (mub-gui was closed or crashed while they ran). Returns how many were adopted.
+    pub async fn adopt_running(&self, paths: &AppPaths) -> usize {
+        let file = paths.running_file();
+        let file2 = file.clone();
+        let records = tokio::task::spawn_blocking(move || RunningStore::alive(&file2))
+            .await
+            .unwrap_or_default();
+        let mut adopted = 0;
+        for rec in records {
+            {
+                let mut map = self.inner.write().await;
+                if matches!(
+                    map.get(&rec.profile_id).map(|e| &e.status.state),
+                    Some(InstanceState::Preparing | InstanceState::Running)
+                ) {
+                    continue;
+                }
+                let hidden = window::pid_hidden(rec.pid).unwrap_or(false);
+                let mut status = InstanceStatus {
+                    profile_id: rec.profile_id.clone(),
+                    profile_name: rec.profile_name.clone(),
+                    account_name: rec.account_name.clone(),
+                    pid: Some(rec.pid),
+                    state: InstanceState::Running,
+                    progress: None,
+                    started_at: rec.started_at,
+                    ended_at: None,
+                    logs: VecDeque::with_capacity(MAX_LOG_LINES),
+                    hide_window: hidden,
+                    adopted: true,
+                };
+                push_log(
+                    &mut status,
+                    format!(
+                        "[MUB] Re-attached to running instance (PID {}); log continues from logs/latest.log",
+                        rec.pid
+                    ),
+                );
+                map.insert(rec.profile_id.clone(), RunningEntry { status, child: None });
+            }
+            self.spawn_window_keeper(rec.profile_id.clone(), rec.pid, true);
+            self.spawn_adopted_watcher(
+                rec.clone(),
+                paths.logs_dir(&rec.profile_id).join("latest.log"),
+                file.clone(),
+            );
+            adopted += 1;
+        }
+        adopted
+    }
+
+    /// Hides each new window of a hidden instance the moment it appears (often only after mod
+    /// loading, and again if the game recreates it, e.g. on a fullscreen toggle). Every window is
+    /// handled once: a window the user showed on purpose is never hidden again behind their back,
+    /// even when another mub process (CLI, MCP) watches the same game. With `adopted`, the windows
+    /// that already exist are left as they are.
+    fn spawn_window_keeper(&self, profile_id: String, pid: u32, adopted: bool) {
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let mut seen: std::collections::HashSet<window::Hwnd> = if adopted {
+                tokio::task::spawn_blocking(move || window::find_windows(pid))
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect()
+            } else {
+                Default::default()
+            };
+            loop {
+                let fast = started.elapsed() < Duration::from_secs(180);
+                tokio::time::sleep(Duration::from_millis(if fast { 100 } else { 1500 })).await;
+                let want_hidden = {
+                    let map = inner.read().await;
+                    match map.get(&profile_id) {
+                        Some(e)
+                            if e.status.state == InstanceState::Running
+                                && e.status.pid == Some(pid) =>
+                        {
+                            e.status.hide_window
+                        }
+                        _ => break,
+                    }
+                };
+                let new: Vec<window::Hwnd> =
+                    tokio::task::spawn_blocking(move || window::find_windows(pid))
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|h| !seen.contains(h))
+                        .collect();
+                if new.is_empty() {
+                    continue;
+                }
+                seen.extend(new.iter().copied());
+                if want_hidden {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        for h in new {
+                            window::set_hidden(h, true);
+                        }
+                    })
+                    .await;
+                }
+            }
+        });
+    }
+
+    /// For adopted instances: notices when the process ends and tails logs/latest.log into the log view.
+    fn spawn_adopted_watcher(
+        &self,
+        rec: RunningRecord,
+        log_file: std::path::PathBuf,
+        running_file: std::path::PathBuf,
+    ) {
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let mut offset = std::fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0);
+            // Start with the last lines so the log tab is not empty.
+            if let Ok(text) = std::fs::read_to_string(&log_file) {
+                let tail: Vec<String> = text.lines().rev().take(200).map(str::to_string).collect();
+                let mut map = inner.write().await;
+                if let Some(e) = map.get_mut(&rec.profile_id) {
+                    for l in tail.into_iter().rev() {
+                        push_log(&mut e.status, l);
+                    }
+                }
+            }
+            let mut partial = String::new();
+            loop {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                let rec2 = rec.clone();
+                let alive = tokio::task::spawn_blocking(move || rec2.is_alive())
+                    .await
+                    .unwrap_or(false);
+                let new_text = read_from(&log_file, &mut offset);
+                let mut map = inner.write().await;
+                let Some(e) = map.get_mut(&rec.profile_id) else { break };
+                if !e.status.adopted {
+                    break; // relaunched by this mub in the meantime
+                }
+                if let Some(t) = new_text {
+                    partial.push_str(&t);
+                    while let Some(i) = partial.find('\n') {
+                        let line: String = partial.drain(..=i).collect();
+                        push_log(&mut e.status, line.trim_end().to_string());
+                    }
+                }
+                let stopped_here = e.status.state != InstanceState::Running;
+                if !alive && !stopped_here {
+                    e.status.state = InstanceState::Stopped { exit_code: None };
+                    e.status.ended_at = Some(Utc::now());
+                    e.status.pid = None;
+                }
+                if !alive || stopped_here {
+                    drop(map);
+                    RunningStore::remove(&running_file, &rec.profile_id, rec.pid);
+                    break;
+                }
+            }
+        });
     }
 
     async fn mark_failed(&self, profile_id: &str, error: String) {
@@ -429,7 +664,7 @@ impl InstanceManager {
         });
     }
 
-    fn spawn_exit_watcher(&self, profile_id: String) {
+    fn spawn_exit_watcher(&self, profile_id: String, pid: Option<u32>, running_file: std::path::PathBuf) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             loop {
@@ -441,7 +676,13 @@ impl InstanceManager {
                 let Some(child) = entry.child.as_mut() else {
                     break;
                 };
-                match child.try_wait() {
+                let res = child.try_wait();
+                if !matches!(res, Ok(None))
+                    && let Some(p) = pid
+                {
+                    RunningStore::remove(&running_file, &profile_id, p);
+                }
+                match res {
                     Ok(Some(status)) => {
                         entry.status.state = InstanceState::Stopped {
                             exit_code: status.code(),
@@ -464,6 +705,54 @@ impl InstanceManager {
                 }
             }
         });
+    }
+}
+
+/// Read whatever was appended to `path` since `offset` (restarts at 0 when the file was rotated).
+fn read_from(path: &std::path::Path, offset: &mut u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len < *offset {
+        *offset = 0;
+    }
+    if len == *offset {
+        return None;
+    }
+    f.seek(SeekFrom::Start(*offset)).ok()?;
+    let mut buf = Vec::new();
+    f.take(len - *offset).read_to_end(&mut buf).ok()?;
+    *offset = len;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Set `key:value` in a Minecraft options.txt, but only when the file already exists (a missing file
+/// is created by the game with its defaults) and the value differs.
+fn ensure_option(path: &std::path::Path, key: &str, value: &str) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    let prefix = format!("{key}:");
+    let wanted = format!("{key}:{value}");
+    let mut found = false;
+    let mut changed = false;
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.starts_with(&prefix) {
+                found = true;
+                if l != wanted {
+                    changed = true;
+                    return wanted.clone();
+                }
+            }
+            l.to_string()
+        })
+        .collect();
+    if !found {
+        lines.push(wanted);
+        changed = true;
+    }
+    if changed {
+        let _ = std::fs::write(path, lines.join("\n") + "\n");
     }
 }
 
@@ -554,4 +843,44 @@ fn mc_supports_quick_play(mc_version: &str) -> bool {
     let major: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     major >= 2 || minor >= 20
+}
+
+#[cfg(test)]
+mod window_option_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_option_replaces_appends_and_skips_missing_file() {
+        let dir = std::env::temp_dir().join(format!("mub-opt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("options.txt");
+
+        ensure_option(&f, "inactivityFpsLimit", "\"afk\"");
+        assert!(!f.exists(), "a missing options.txt is left for the game to create");
+
+        std::fs::write(&f, "version:4000\ninactivityFpsLimit:\"minimized\"\nmaxFps:120\n").unwrap();
+        ensure_option(&f, "inactivityFpsLimit", "\"afk\"");
+        let t = std::fs::read_to_string(&f).unwrap();
+        assert!(t.contains("inactivityFpsLimit:\"afk\"") && t.contains("maxFps:120") && !t.contains("minimized"));
+
+        std::fs::write(&f, "version:4000\n").unwrap();
+        ensure_option(&f, "inactivityFpsLimit", "\"afk\"");
+        assert!(std::fs::read_to_string(&f).unwrap().ends_with("inactivityFpsLimit:\"afk\"\n"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bots_hide_by_default_players_do_not() {
+        let mut bot = Profile::new("b", crate::profile::ProfileKind::Bot, "26.3", ModLoader::Vanilla);
+        let player = Profile::new("p", crate::profile::ProfileKind::Player, "26.3", ModLoader::Vanilla);
+        assert!(bot.hides_window());
+        assert!(!player.hides_window());
+        bot.hide_window = Some(false);
+        assert!(!bot.hides_window());
+        // Old profiles.json without the field still load (serde default).
+        let mut v = serde_json::to_value(&player).unwrap();
+        v.as_object_mut().unwrap().remove("hide_window");
+        let back: Profile = serde_json::from_value(v).unwrap();
+        assert_eq!(back.hide_window, None);
+    }
 }

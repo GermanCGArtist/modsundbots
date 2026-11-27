@@ -92,6 +92,7 @@ pub enum NavIcon {
     Discover,
     Accounts,
     Console,
+    Wall,
     Config,
 }
 
@@ -1467,6 +1468,14 @@ fn paint_pixel_nav_icon(p: &egui::Painter, rect: Rect, icon: NavIcon, color: Col
             px(3, 4, 1, 1);
             px(2, 5, 1, 1);
             px(5, 6, 3, 1);
+        }
+        NavIcon::Wall => {
+            // a 3x3 wall of small screens
+            for gy in [1u8, 4, 7] {
+                for gx in [1u8, 4, 7] {
+                    px(gx, gy, 2, 2);
+                }
+            }
         }
         NavIcon::Config => {
             px(1, 2, 8, 1);

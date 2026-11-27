@@ -15,7 +15,13 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
+    /// The app data folder; `MUB_HOME` overrides it (separate test setups, portable installs).
     pub fn default_root() -> Result<Self> {
+        if let Some(home) = std::env::var_os("MUB_HOME").filter(|h| !h.is_empty()) {
+            return Ok(Self {
+                root: PathBuf::from(home),
+            });
+        }
         let proj = ProjectDirs::from("dev", "modsundbots", "ModsUndBots")
             .ok_or_else(|| MubError::Launch("Unable to determine OS app data directory".into()))?;
         Ok(Self {
@@ -33,6 +39,11 @@ impl AppPaths {
 
     pub fn profiles_file(&self) -> PathBuf {
         self.root.join("profiles.json")
+    }
+
+    /// Instances started by any mub process (GUI, CLI, MCP) that may still be running.
+    pub fn running_file(&self) -> PathBuf {
+        self.root.join("running.json")
     }
 
     pub fn collections_file(&self) -> PathBuf {
