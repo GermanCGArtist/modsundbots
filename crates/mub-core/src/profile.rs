@@ -238,6 +238,8 @@ pub struct LauncherSettings {
     pub curseforge_api_key: String,
     #[serde(default)]
     pub github_update_token: String,
+    #[serde(default)]
+    pub github_mod_repos: Vec<String>,
 }
 
 impl Default for LauncherSettings {
@@ -245,11 +247,12 @@ impl Default for LauncherSettings {
         Self {
             default_java_path: "java".to_string(),
             msa_client_id: crate::account::DEFAULT_MSA_CLIENT_ID.to_string(),
-            batch_launch_stagger_ms: 1500,
+            batch_launch_stagger_ms: 0,
             max_concurrent_downloads: 16,
             theme_palette: default_theme_palette(),
             curseforge_api_key: String::new(),
             github_update_token: String::new(),
+            github_mod_repos: Vec::new(),
         }
     }
 }

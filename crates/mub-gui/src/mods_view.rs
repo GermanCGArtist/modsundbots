@@ -5,8 +5,9 @@ use std::sync::Arc;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Id, Margin, Order, RichText, Sense, Stroke};
 use mub_core::{
     AppPaths, CatalogClient, CatalogDetail, CatalogHit, CatalogSort, CatalogVersion, ContentKind,
-    ContentSource, ModLoader, ModpackImportResult, ModrinthEnvironment, MubError, Profile,
-    ProfileKind, ProfileStore, SourceFilter, install_modpack_from_catalog, list_installed_content,
+    ContentSource, LauncherSettings, ModLoader, ModpackImportResult, ModrinthEnvironment, MubError,
+    Profile, ProfileKind, ProfileStore, SourceFilter, install_modpack_from_catalog,
+    list_installed_content,
 };
 use tokio::sync::{Semaphore, mpsc};
 
@@ -69,6 +70,7 @@ enum ModBgEvent {
         detail: CatalogDetail,
         mr_versions: Vec<CatalogVersion>,
         cf_versions: Vec<CatalogVersion>,
+        gh_versions: Vec<CatalogVersion>,
         dep_names: HashMap<(ContentSource, String), String>,
     },
     ImageLoaded {
@@ -121,6 +123,7 @@ pub struct ModsViewState {
     pub active_detail: Option<CatalogDetail>,
     pub mr_versions: Vec<CatalogVersion>,
     pub cf_versions: Vec<CatalogVersion>,
+    pub gh_versions: Vec<CatalogVersion>,
     pub dep_names: HashMap<(ContentSource, String), String>,
     pub detail_tab: DetailTab,
     pub detail_loading: bool,
@@ -166,6 +169,7 @@ impl ModsViewState {
             active_detail: None,
             mr_versions: Vec::new(),
             cf_versions: Vec::new(),
+            gh_versions: Vec::new(),
             dep_names: HashMap::new(),
             detail_tab: DetailTab::Overview,
             detail_loading: false,
@@ -236,6 +240,7 @@ impl ModsViewState {
                     detail,
                     mr_versions,
                     cf_versions,
+                    gh_versions,
                     dep_names,
                 } => {
                     self.detail_loading = false;
@@ -250,6 +255,7 @@ impl ModsViewState {
                     self.active_detail = Some(detail);
                     self.mr_versions = mr_versions;
                     self.cf_versions = cf_versions;
+                    self.gh_versions = gh_versions;
                     self.dep_names = dep_names;
                 }
                 ModBgEvent::ImageLoaded { key, image } => {
@@ -274,6 +280,7 @@ impl ModsViewState {
                     let tone = match source {
                         ContentSource::Modrinth => ToastTone::Mr,
                         ContentSource::CurseForge => ToastTone::Cf,
+                        ContentSource::GitHub => ToastTone::Meta,
                     };
                     actions.push(ModsAction::Toast(tone, message));
                 }
@@ -426,13 +433,17 @@ impl ModsViewState {
         &mut self,
         rt: &Arc<tokio::runtime::Runtime>,
         ctx: &egui::Context,
-        cf_api_key: Option<String>,
+        settings: &LauncherSettings,
         profile: &Profile,
         append: bool,
     ) {
         self.loading = true;
         self.loaded_once = true;
-        let catalog = CatalogClient::new(cf_api_key);
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let source_filter = self.source_filter;
         let kind = self.content_kind;
         let query = self.query.trim().to_string();
@@ -481,6 +492,7 @@ impl ModsViewState {
                             .map(|h| CatalogHit {
                                 modrinth_id: Some(h.project_id),
                                 curseforge_id: None,
+                                github_repo: None,
                                 sources: vec![ContentSource::Modrinth],
                                 kind,
                                 title: h.title,
@@ -537,7 +549,7 @@ impl ModsViewState {
         &mut self,
         rt: &Arc<tokio::runtime::Runtime>,
         ctx: &egui::Context,
-        cf_api_key: Option<String>,
+        settings: &LauncherSettings,
         hit: &CatalogHit,
         profile: &Profile,
     ) {
@@ -548,10 +560,15 @@ impl ModsViewState {
         self.active_detail = None;
         self.mr_versions.clear();
         self.cf_versions.clear();
+        self.gh_versions.clear();
         self.dep_names.clear();
         self.lightbox = None;
 
-        let catalog = CatalogClient::new(cf_api_key);
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let hit = hit.clone();
         let mc = profile.mc_version.clone();
         let loader = self.effective_loader(profile);
@@ -595,7 +612,24 @@ impl ModsViewState {
                             Vec::new()
                         }
                     };
-                    let (mr_versions, cf_versions) = tokio::join!(mr_fut, cf_fut);
+                    let gh_fut = async {
+                        if let Some(gh_repo) = &detail.github_repo {
+                            catalog
+                                .list_versions(
+                                    ContentSource::GitHub,
+                                    gh_repo,
+                                    detail.kind,
+                                    Some(&mc),
+                                    loader.as_ref(),
+                                )
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    let (mr_versions, cf_versions, gh_versions) =
+                        tokio::join!(mr_fut, cf_fut, gh_fut);
 
                     // Resolve human-readable dependency names for displayed dependencies
                     let mut mr_dep_ids = Vec::new();
@@ -616,6 +650,7 @@ impl ModsViewState {
                                             cf_dep_ids.push(num);
                                         }
                                     }
+                                    ContentSource::GitHub => {}
                                 }
                             }
                         }
@@ -643,6 +678,7 @@ impl ModsViewState {
                         detail,
                         mr_versions,
                         cf_versions,
+                        gh_versions,
                         dep_names,
                     });
                 }
@@ -664,7 +700,7 @@ impl ModsViewState {
         ctx: &egui::Context,
         paths: &AppPaths,
         profiles: &ProfileStore,
-        cf_api_key: Option<String>,
+        settings: &LauncherSettings,
         selected: &Profile,
         hit: &CatalogHit,
         source: ContentSource,
@@ -677,6 +713,7 @@ impl ModsViewState {
         let Some(pid) = (match source {
             ContentSource::Modrinth => hit.modrinth_id.clone(),
             ContentSource::CurseForge => hit.curseforge_id.map(|id| id.to_string()),
+            ContentSource::GitHub => hit.github_repo.clone(),
         }) else {
             return;
         };
@@ -696,7 +733,11 @@ impl ModsViewState {
             }
         }
 
-        let catalog = CatalogClient::new(cf_api_key);
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let paths = paths.clone();
         let title = hit.title.clone();
         let kind = hit.kind;
@@ -821,7 +862,7 @@ impl ModsViewState {
         ctx: &egui::Context,
         paths: &AppPaths,
         profiles: &ProfileStore,
-        cf_api_key: Option<String>,
+        settings: &LauncherSettings,
         selected: &Profile,
         kind: ContentKind,
         version: &CatalogVersion,
@@ -847,7 +888,11 @@ impl ModsViewState {
             }
         }
 
-        let catalog = CatalogClient::new(cf_api_key);
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let paths = paths.clone();
         let version = version.clone();
         let title = title.to_string();
@@ -951,8 +996,9 @@ impl ModsViewState {
         rt: &Arc<tokio::runtime::Runtime>,
         paths: &AppPaths,
         profiles: &ProfileStore,
-        cf_api_key: Option<String>,
+        settings: &LauncherSettings,
     ) -> Vec<ModsAction> {
+        let cf_api_key = settings.effective_curseforge_api_key();
         let mut actions = Vec::new();
         self.drain_events(ctx, rt, paths, &mut actions);
 
@@ -1133,6 +1179,7 @@ impl ModsViewState {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 for (sf, label, tone) in [
+                    (SourceFilter::GitHub, "GITHUB", ButtonTone::GitHub),
                     (SourceFilter::CurseForge, "CURSEFORGE", ButtonTone::CurseForge),
                     (SourceFilter::Modrinth, "MODRINTH", ButtonTone::Modrinth),
                     (SourceFilter::All, "UNIFIED", ButtonTone::Focus),
@@ -1235,7 +1282,7 @@ impl ModsViewState {
                 rt,
                 paths,
                 profiles,
-                cf_api_key,
+                settings,
                 &selected,
                 &detail,
                 &mut actions,
@@ -1247,7 +1294,7 @@ impl ModsViewState {
             && !self.loading
             && !(self.source_filter == SourceFilter::CurseForge && cf_api_key.is_none())
         {
-            self.fetch_catalog(rt, ctx, cf_api_key.clone(), &selected, false);
+            self.fetch_catalog(rt, ctx, settings, &selected, false);
         }
 
         self.ui_discover(
@@ -1257,7 +1304,7 @@ impl ModsViewState {
             rt,
             paths,
             profiles,
-            cf_api_key,
+            settings,
             &selected,
             &mut actions,
         );
@@ -1274,10 +1321,11 @@ impl ModsViewState {
         rt: &Arc<tokio::runtime::Runtime>,
         paths: &AppPaths,
         profiles: &ProfileStore,
-        cf_api_key: Option<String>,
+        settings: &LauncherSettings,
         selected: &Profile,
         actions: &mut Vec<ModsAction>,
     ) {
+        let cf_api_key = settings.effective_curseforge_api_key();
         let mut trigger_fetch = false;
         let rail_w = 196.0_f32;
         let avail_h = ui.available_height();
@@ -1547,7 +1595,11 @@ impl ModsViewState {
                                 .is_some_and(|id| installed_ids.contains(id))
                                 || hit
                                     .curseforge_id
-                                    .is_some_and(|id| installed_ids.contains(&id.to_string()));
+                                    .is_some_and(|id| installed_ids.contains(&id.to_string()))
+                                || hit
+                                    .github_repo
+                                    .as_ref()
+                                    .is_some_and(|repo| installed_ids.contains(repo));
 
                             theme::term_row(ui, palette, |ui| {
                                 let card_w = ui.available_width();
@@ -1560,8 +1612,10 @@ impl ModsViewState {
                                     let icon_key = hit_icon_key(hit);
                                     let accent = if hit.sources.contains(&ContentSource::Modrinth) {
                                         palette.mr
-                                    } else {
+                                    } else if hit.sources.contains(&ContentSource::CurseForge) {
                                         palette.cf
+                                    } else {
+                                        palette.meta
                                     };
                                     self.render_icon(ui, palette, &icon_key, &hit.title, accent, icon_w);
                                     ui.add_space(6.0);
@@ -1608,6 +1662,14 @@ impl ModsViewState {
                                                                 "CF",
                                                                 palette.cf,
                                                                 palette.cf_bg,
+                                                            );
+                                                        }
+                                                        ContentSource::GitHub => {
+                                                            theme::term_badge(
+                                                                ui,
+                                                                "GH",
+                                                                palette.meta,
+                                                                palette.meta_bg,
                                                             );
                                                         }
                                                     }
@@ -1694,11 +1756,45 @@ impl ModsViewState {
                                             let has_mr = hit.modrinth_id.is_some();
                                             let has_cf = hit.curseforge_id.is_some()
                                                 && cf_api_key.is_some();
+                                            let has_gh = hit.github_repo.is_some();
                                             let compact = has_mr && has_cf;
 
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
+                                                    if has_gh {
+                                                        let ikey = hit_install_key(
+                                                            hit,
+                                                            ContentSource::GitHub,
+                                                        );
+                                                        let busy =
+                                                            self.installing_keys.contains(&ikey);
+                                                        let lbl = if busy {
+                                                            "..."
+                                                        } else if hit.kind == ContentKind::Modpack
+                                                        {
+                                                            "[+] GH PACK"
+                                                        } else {
+                                                            "[↓] GH INSTALL"
+                                                        };
+                                                        if ui
+                                                            .add_enabled_ui(!busy, |ui| {
+                                                                theme::term_button(
+                                                                    ui,
+                                                                    palette,
+                                                                    lbl,
+                                                                    ButtonTone::GitHub,
+                                                                )
+                                                            })
+                                                            .inner
+                                                            .clicked()
+                                                        {
+                                                            install_target = Some((
+                                                                hit.clone(),
+                                                                ContentSource::GitHub,
+                                                            ));
+                                                        }
+                                                    }
                                                     if has_cf {
                                                         let ikey = hit_install_key(
                                                             hit,
@@ -1829,7 +1925,7 @@ impl ModsViewState {
                     }
 
                     if let Some(hit) = detail_to_open {
-                        self.open_project_detail(rt, ctx, cf_api_key.clone(), &hit, selected);
+                        self.open_project_detail(rt, ctx, settings, &hit, selected);
                     }
                     if let Some((hit, src)) = install_target {
                         self.install_from_hit(
@@ -1837,7 +1933,7 @@ impl ModsViewState {
                             ctx,
                             paths,
                             profiles,
-                            cf_api_key.clone(),
+                            settings,
                             selected,
                             &hit,
                             src,
@@ -1846,7 +1942,7 @@ impl ModsViewState {
                     }
                     if load_more && !self.loading {
                         self.page += 1;
-                        self.fetch_catalog(rt, ctx, cf_api_key.clone(), selected, true);
+                        self.fetch_catalog(rt, ctx, settings, selected, true);
                     }
                 },
             );
@@ -1856,7 +1952,7 @@ impl ModsViewState {
             && !self.loading
             && !(self.source_filter == SourceFilter::CurseForge && cf_api_key.is_none())
         {
-            self.fetch_catalog(rt, ctx, cf_api_key, selected, false);
+            self.fetch_catalog(rt, ctx, settings, selected, false);
         }
     }
 
@@ -1869,7 +1965,7 @@ impl ModsViewState {
         rt: &Arc<tokio::runtime::Runtime>,
         paths: &AppPaths,
         profiles: &ProfileStore,
-        cf_api_key: Option<String>,
+        settings: &LauncherSettings,
         selected: &Profile,
         detail: &CatalogDetail,
         actions: &mut Vec<ModsAction>,
@@ -1891,6 +1987,9 @@ impl ModsViewState {
                         ContentSource::CurseForge => {
                             theme::term_badge(ui, "CF", palette.cf, palette.cf_bg);
                         }
+                        ContentSource::GitHub => {
+                            theme::term_badge(ui, "GH", palette.meta, palette.meta_bg);
+                        }
                     }
                 }
                 ui.label(
@@ -1910,7 +2009,11 @@ impl ModsViewState {
             .is_some_and(|id| installed_ids.contains(id))
             || detail
                 .curseforge_id
-                .is_some_and(|id| installed_ids.contains(&id.to_string()));
+                .is_some_and(|id| installed_ids.contains(&id.to_string()))
+            || detail
+                .github_repo
+                .as_ref()
+                .is_some_and(|repo| installed_ids.contains(repo));
 
         // Hero Header
         let mut version_to_install: Option<CatalogVersion> = None;
@@ -1923,8 +2026,10 @@ impl ModsViewState {
                 let icon_key = detail_icon_key(detail);
                 let accent = if detail.sources.contains(&ContentSource::Modrinth) {
                     palette.mr
-                } else {
+                } else if detail.sources.contains(&ContentSource::CurseForge) {
                     palette.cf
+                } else {
+                    palette.meta
                 };
                 self.render_icon(ui, palette, &icon_key, &detail.title, accent, 64.0);
                 ui.add_space(10.0);
@@ -2235,11 +2340,20 @@ impl ModsViewState {
                 ui.add_space(6.0);
 
                 let mut combined: Vec<&CatalogVersion> = Vec::new();
-                if self.detail_source_filter != SourceFilter::CurseForge {
+                if self.detail_source_filter != SourceFilter::CurseForge
+                    && self.detail_source_filter != SourceFilter::GitHub
+                {
                     combined.extend(self.mr_versions.iter());
                 }
-                if self.detail_source_filter != SourceFilter::Modrinth {
+                if self.detail_source_filter != SourceFilter::Modrinth
+                    && self.detail_source_filter != SourceFilter::GitHub
+                {
                     combined.extend(self.cf_versions.iter());
+                }
+                if self.detail_source_filter == SourceFilter::All
+                    || self.detail_source_filter == SourceFilter::GitHub
+                {
+                    combined.extend(self.gh_versions.iter());
                 }
                 combined.sort_by(|a, b| b.date_published.cmp(&a.date_published));
 
@@ -2300,6 +2414,14 @@ impl ModsViewState {
                                                         "CF",
                                                         palette.cf,
                                                         palette.cf_bg,
+                                                    );
+                                                }
+                                                ContentSource::GitHub => {
+                                                    theme::term_badge(
+                                                        ui,
+                                                        "GH",
+                                                        palette.meta,
+                                                        palette.meta_bg,
                                                     );
                                                 }
                                             }
@@ -2452,6 +2574,14 @@ impl ModsViewState {
                                         ContentSource::CurseForge => {
                                             theme::term_badge(ui, "CF", palette.cf, palette.cf_bg);
                                         }
+                                        ContentSource::GitHub => {
+                                            theme::term_badge(
+                                                ui,
+                                                "GH",
+                                                palette.meta,
+                                                palette.meta_bg,
+                                            );
+                                        }
                                     }
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
@@ -2488,7 +2618,7 @@ impl ModsViewState {
                 ctx,
                 paths,
                 profiles,
-                cf_api_key,
+                settings,
                 selected,
                 detail.kind,
                 &ver,
@@ -2603,6 +2733,7 @@ fn hit_install_key(hit: &CatalogHit, source: ContentSource) -> String {
             "cf_{}",
             hit.curseforge_id.map(|i| i.to_string()).unwrap_or_else(|| hit.slug.clone())
         ),
+        ContentSource::GitHub => format!("gh_{}", hit.github_repo.as_deref().unwrap_or(&hit.slug)),
     }
 }
 

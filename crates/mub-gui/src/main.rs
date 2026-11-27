@@ -1098,26 +1098,39 @@ impl MubApp {
         let tx = self.tx.clone();
 
         self.rt.spawn(async move {
-            let client = MsaAuthClient::new(&settings.msa_client_id);
-            let mut prepared_items = Vec::with_capacity(items.len());
-            for (p, mut acc) in items {
-                if acc.is_msa() && !acc.is_token_valid() {
-                    match client.refresh_account(&acc).await {
-                        Ok(refreshed) => {
-                            acc = refreshed.clone();
-                            let _ = tx.send(BgEvent::AccountRefreshed(refreshed));
+            let mut refresh_set = tokio::task::JoinSet::new();
+            for (idx, (p, acc)) in items.into_iter().enumerate() {
+                let msa_client_id = settings.msa_client_id.clone();
+                let tx_ref = tx.clone();
+                refresh_set.spawn(async move {
+                    if acc.is_msa() && !acc.is_token_valid() {
+                        let client = MsaAuthClient::new(&msa_client_id);
+                        match client.refresh_account(&acc).await {
+                            Ok(refreshed) => {
+                                let _ = tx_ref.send(BgEvent::AccountRefreshed(refreshed.clone()));
+                                Some((idx, (p, refreshed)))
+                            }
+                            Err(e) => {
+                                let _ = tx_ref.send(BgEvent::Toast(
+                                    ToastTone::Danger,
+                                    format!("Token refresh failed for {}: {e}", acc.username),
+                                ));
+                                None
+                            }
                         }
-                        Err(e) => {
-                            let _ = tx.send(BgEvent::Toast(
-                                ToastTone::Danger,
-                                format!("Token refresh failed for {}: {e}", acc.username),
-                            ));
-                            continue;
-                        }
+                    } else {
+                        Some((idx, (p, acc)))
                     }
-                }
-                prepared_items.push((p, acc));
+                });
             }
+            let mut indexed = Vec::new();
+            while let Some(res) = refresh_set.join_next().await {
+                if let Ok(Some(pair)) = res {
+                    indexed.push(pair);
+                }
+            }
+            indexed.sort_by_key(|(idx, _)| *idx);
+            let prepared_items: Vec<_> = indexed.into_iter().map(|(_, item)| item).collect();
             let results = mgr
                 .launch_batch_with_stagger(&paths, &settings, prepared_items, stagger_ms_override)
                 .await;
@@ -1282,6 +1295,8 @@ impl MubApp {
         let total_profiles = profiles.len();
         let paths = self.paths.clone();
         let cf_key = self.settings.effective_curseforge_api_key();
+        let gh_token = self.settings.effective_github_update_token();
+        let gh_repos = self.settings.github_mod_repos.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
 
@@ -1291,7 +1306,7 @@ impl MubApp {
         ))));
 
         self.rt.spawn(async move {
-            let catalog = CatalogClient::new(cf_key);
+            let catalog = CatalogClient::with_github(cf_key, gh_token, gh_repos);
             let mut map = HashMap::new();
             let kinds = [
                 ContentKind::Mod,
@@ -2222,7 +2237,7 @@ impl eframe::App for MubApp {
                         &self.rt,
                         &self.paths,
                         &self.profiles,
-                        self.settings.effective_curseforge_api_key(),
+                        &self.settings,
                     );
                     self.handle_mods_actions(actions);
                 }
@@ -4641,8 +4656,13 @@ impl MubApp {
                                         palette.mr_bg,
                                     );
                                 }
+                                let launch_mode_label = if stagger_eff == 0 {
+                                    "parallel".to_string()
+                                } else {
+                                    format!("stagger: {stagger_eff}ms")
+                                };
                                 ui.label(
-                                    RichText::new(format!("stagger: {stagger_eff}ms"))
+                                    RichText::new(launch_mode_label)
                                         .monospace()
                                         .size(10.5)
                                         .color(palette.ink_muted),

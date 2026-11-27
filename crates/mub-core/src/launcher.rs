@@ -102,13 +102,16 @@ impl InstanceManager {
         profile: &Profile,
         account: &Account,
     ) -> Result<()> {
-        if self.is_running(&profile.id).await {
-            return Err(MubError::InstanceAlreadyRunning(profile.name.clone()));
-        }
-
-        // Insert Preparing state immediately so UI/CLI sees it right away.
+        // Atomically check running state and insert Preparing state so parallel
+        // launches of the same profile cannot race and UI/CLI sees Preparing immediately.
         {
             let mut map = self.inner.write().await;
+            if matches!(
+                map.get(&profile.id).map(|e| &e.status.state),
+                Some(InstanceState::Preparing | InstanceState::Running)
+            ) {
+                return Err(MubError::InstanceAlreadyRunning(profile.name.clone()));
+            }
             map.insert(
                 profile.id.clone(),
                 RunningEntry {
@@ -130,7 +133,8 @@ impl InstanceManager {
 
         let natives_dir = paths.natives_dir(&profile.id);
         let game_dir = paths.instance_dir(&profile.id);
-        if let Err(e) = std::fs::create_dir_all(&game_dir) {
+        let tmp_dir = game_dir.join(".tmp");
+        if let Err(e) = std::fs::create_dir_all(&game_dir).and_then(|_| std::fs::create_dir_all(&tmp_dir)) {
             self.mark_failed(&profile.id, e.to_string()).await;
             return Err(e.into());
         }
@@ -205,7 +209,23 @@ impl InstanceManager {
         cmd.arg(format!("-Djava.library.path={}", natives_dir.display()));
         cmd.arg("-Dminecraft.launcher.brand=ModsUndBots");
         cmd.arg("-Dminecraft.launcher.version=0.2.0");
+        let has_custom_tmpdir = prepared
+            .extra_jvm_args
+            .iter()
+            .chain(profile.jvm_args.iter())
+            .any(|a| a.starts_with("-Djava.io.tmpdir="));
+        if !has_custom_tmpdir {
+            cmd.arg(format!("-Djava.io.tmpdir={}", tmp_dir.display()));
+        }
         for extra in &prepared.extra_jvm_args {
+            if let Some(prop_key) = extra.strip_prefix("-D").and_then(|s| s.split_once('=').map(|(k, _)| k))
+                && profile
+                    .jvm_args
+                    .iter()
+                    .any(|u| u.starts_with(&format!("-D{prop_key}=")))
+            {
+                continue;
+            }
             cmd.arg(extra);
         }
         for extra in &profile.jvm_args {
@@ -300,8 +320,8 @@ impl InstanceManager {
         Ok(())
     }
 
-    /// Launch multiple profiles in sequence with a configurable stagger delay
-    /// so CPU/disk/login spikes are avoided when booting a bot swarm.
+    /// Launch multiple profiles in parallel (or with an optional stagger delay
+    /// when configured in settings).
     pub async fn launch_batch(
         &self,
         paths: &AppPaths,
@@ -312,7 +332,11 @@ impl InstanceManager {
             .await
     }
 
-    /// Launch multiple profiles in sequence with an optional stagger delay override.
+    /// Launch multiple profiles in parallel with an optional per-instance stagger override.
+    ///
+    /// When the effective stagger is 0 (the default), all profiles prepare and start
+    /// concurrently. When a non-zero stagger is configured, tasks still run concurrently
+    /// with an initial offset of `idx * stagger`.
     pub async fn launch_batch_with_stagger(
         &self,
         paths: &AppPaths,
@@ -320,22 +344,25 @@ impl InstanceManager {
         items: Vec<(Profile, Account)>,
         stagger_ms_override: Option<u64>,
     ) -> Vec<(String, Result<()>)> {
-        let mut results = Vec::with_capacity(items.len());
         let stagger = Duration::from_millis(
             stagger_ms_override.unwrap_or(settings.batch_launch_stagger_ms),
         );
 
-        for (idx, (profile, account)) in items.into_iter().enumerate() {
-            if idx > 0 && !stagger.is_zero() {
-                tokio::time::sleep(stagger).await;
+        let futs = items.into_iter().enumerate().map(|(idx, (profile, account))| {
+            let mgr = self.clone();
+            let paths = paths.clone();
+            let settings = settings.clone();
+            async move {
+                if idx > 0 && !stagger.is_zero() {
+                    tokio::time::sleep(stagger.saturating_mul(idx as u32)).await;
+                }
+                let id = profile.id.clone();
+                let res = mgr.launch_profile(&paths, &settings, &profile, &account).await;
+                (id, res)
             }
-            let res = self
-                .launch_profile(paths, settings, &profile, &account)
-                .await;
-            results.push((profile.id, res));
-        }
+        });
 
-        results
+        futures_util::future::join_all(futs).await
     }
 
     /// Terminate a running instance.

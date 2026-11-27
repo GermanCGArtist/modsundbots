@@ -1048,7 +1048,11 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
 
             let settings = state.load_settings()?;
-            let client = CatalogClient::new(settings.effective_curseforge_api_key());
+            let client = CatalogClient::with_github(
+                settings.effective_curseforge_api_key(),
+                settings.effective_github_update_token(),
+                settings.github_mod_repos.clone(),
+            );
             let resp = client
                 .search(
                     source,
@@ -1127,12 +1131,20 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
             }
 
             let settings = state.load_settings()?;
-            let client = CatalogClient::new(settings.effective_curseforge_api_key());
+            let client = CatalogClient::with_github(
+                settings.effective_curseforge_api_key(),
+                settings.effective_github_update_token(),
+                settings.github_mod_repos.clone(),
+            );
             let content_source = match source {
                 SourceFilter::CurseForge => ContentSource::CurseForge,
                 SourceFilter::Modrinth => ContentSource::Modrinth,
+                SourceFilter::GitHub => ContentSource::GitHub,
                 SourceFilter::All => {
-                    if project.chars().all(|c| c.is_ascii_digit()) && client.has_curseforge() {
+                    if mub_core::github::parse_repo_spec(&project).is_some() {
+                        ContentSource::GitHub
+                    } else if project.chars().all(|c| c.is_ascii_digit()) && client.has_curseforge()
+                    {
                         ContentSource::CurseForge
                     } else {
                         ContentSource::Modrinth
@@ -1372,24 +1384,34 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
             let col = cols
                 .resolve(&target)
                 .ok_or_else(|| anyhow::anyhow!("Collection '{target}' not found"))?;
-            let mut results = Vec::new();
+            let mut join_set = tokio::task::JoinSet::new();
             for pid in &col.profile_ids {
-                if let Some(prof) = profiles.get(pid) {
-                    let java_bin = resolve_java_async(&settings, prof).await;
-                    match prepare_profile_version(&state.paths, &settings, prof, &java_bin, |_| {})
-                        .await
-                    {
-                        Ok(prep) => results.push(json!({
-                            "profile": prof.name,
-                            "status": "prepared",
-                            "version_id": prep.version_id,
-                        })),
-                        Err(e) => results.push(json!({
-                            "profile": prof.name,
-                            "status": "failed",
-                            "error": e.to_string(),
-                        })),
-                    }
+                if let Some(prof) = profiles.get(pid).cloned() {
+                    let paths = state.paths.clone();
+                    let settings = settings.clone();
+                    join_set.spawn(async move {
+                        let java_bin = resolve_java_async(&settings, &prof).await;
+                        match prepare_profile_version(&paths, &settings, &prof, &java_bin, |_| {})
+                            .await
+                        {
+                            Ok(prep) => json!({
+                                "profile": prof.name,
+                                "status": "prepared",
+                                "version_id": prep.version_id,
+                            }),
+                            Err(e) => json!({
+                                "profile": prof.name,
+                                "status": "failed",
+                                "error": e.to_string(),
+                            }),
+                        }
+                    });
+                }
+            }
+            let mut results = Vec::new();
+            while let Some(res) = join_set.join_next().await {
+                if let Ok(item) = res {
+                    results.push(item);
                 }
             }
             Ok(json!({ "collection": col.name, "results": results }))
@@ -1757,6 +1779,7 @@ fn parse_source_filter(s: &str) -> Result<SourceFilter> {
         "all" => Ok(SourceFilter::All),
         "modrinth" => Ok(SourceFilter::Modrinth),
         "curseforge" => Ok(SourceFilter::CurseForge),
+        "github" | "gh" => Ok(SourceFilter::GitHub),
         _ => anyhow::bail!("Invalid source '{s}'."),
     }
 }

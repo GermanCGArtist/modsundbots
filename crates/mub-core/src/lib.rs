@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod collection;
 pub mod curseforge;
 pub mod error;
+pub mod github;
 pub mod java;
 pub mod launcher;
 pub mod modpack;
@@ -28,6 +29,9 @@ pub use curseforge::{
     MC_GAME_ID, compute_murmur2_fingerprint,
 };
 pub use error::{MubError, Result};
+pub use github::{
+    DEFAULT_GITHUB_OWNER, FEATURED_GITHUB_REPOS, GhAsset, GhRelease, GhRepo, GitHubClient,
+};
 pub use java::{
     JavaInstallation, detect_java_installations, pick_best_java, required_java_major,
     resolve_java_for_mc,

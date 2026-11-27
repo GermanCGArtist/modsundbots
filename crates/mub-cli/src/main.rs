@@ -199,6 +199,7 @@ enum CliSource {
     All,
     Modrinth,
     Curseforge,
+    Github,
 }
 
 impl From<CliSource> for SourceFilter {
@@ -207,6 +208,7 @@ impl From<CliSource> for SourceFilter {
             CliSource::All => SourceFilter::All,
             CliSource::Modrinth => SourceFilter::Modrinth,
             CliSource::Curseforge => SourceFilter::CurseForge,
+            CliSource::Github => SourceFilter::GitHub,
         }
     }
 }
@@ -676,7 +678,24 @@ async fn resolve_catalog_version(
                 .next()
                 .with_context(|| format!("No compatible CurseForge version found for '{project}'"))
         }
+        SourceFilter::GitHub => {
+            let versions = catalog
+                .list_versions(ContentSource::GitHub, project, kind, mc_version, loader)
+                .await?;
+            versions
+                .into_iter()
+                .next()
+                .with_context(|| format!("No compatible GitHub release found for '{project}'"))
+        }
         SourceFilter::All => {
+            if mub_core::github::parse_repo_spec(project).is_some()
+                && let Ok(versions) = catalog
+                    .list_versions(ContentSource::GitHub, project, kind, mc_version, loader)
+                    .await
+                && let Some(first) = versions.into_iter().next()
+            {
+                return Ok(first);
+            }
             let is_numeric = project.chars().all(|c| c.is_ascii_digit()) && !project.is_empty();
             if is_numeric
                 && catalog.has_curseforge()
@@ -749,7 +768,11 @@ async fn handle_mods(
     settings: &LauncherSettings,
 ) -> Result<()> {
     let mut prof_store = ProfileStore::load(&paths.profiles_file())?;
-    let catalog = CatalogClient::new(settings.effective_curseforge_api_key());
+    let catalog = CatalogClient::with_github(
+        settings.effective_curseforge_api_key(),
+        settings.effective_github_update_token(),
+        settings.github_mod_repos.clone(),
+    );
 
     match action {
         ModsAction::Search {
@@ -1213,20 +1236,28 @@ async fn handle_collection(
             let col = store
                 .resolve(&collection)
                 .with_context(|| format!("Collection '{collection}' not found"))?;
+            let mut join_set = tokio::task::JoinSet::new();
             for pid in &col.profile_ids {
-                if let Some(p) = prof_store.get(pid) {
-                    println!("Preparing '{}'...", p.name);
-                    let java_bin = resolve_java_for_mc(
-                        p.java_path.as_deref(),
-                        &settings.default_java_path,
-                        &p.mc_version,
-                    );
-                    let pname = p.name.clone();
-                    prepare_profile_version(paths, settings, p, &java_bin, move |msg| {
-                        println!("  [{pname}] {msg}");
-                    })
-                    .await?;
+                if let Some(p) = prof_store.get(pid).cloned() {
+                    let paths = paths.clone();
+                    let settings = settings.clone();
+                    join_set.spawn(async move {
+                        println!("Preparing '{}'...", p.name);
+                        let java_bin = resolve_java_for_mc(
+                            p.java_path.as_deref(),
+                            &settings.default_java_path,
+                            &p.mc_version,
+                        );
+                        let pname = p.name.clone();
+                        prepare_profile_version(&paths, &settings, &p, &java_bin, move |msg| {
+                            println!("  [{pname}] {msg}");
+                        })
+                        .await
+                    });
                 }
+            }
+            while let Some(res) = join_set.join_next().await {
+                res??;
             }
             println!("Collection '{}' prepared.", col.name);
         }

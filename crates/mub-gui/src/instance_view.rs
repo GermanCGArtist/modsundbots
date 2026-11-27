@@ -289,7 +289,11 @@ impl InstanceDetailState {
             0.25,
             format!("Hashing & checking updates for {}...", profile.name),
         ))));
-        let catalog = CatalogClient::new(settings.effective_curseforge_api_key());
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let paths = paths.clone();
         let pid = profile.id.clone();
         let mc = profile.mc_version.clone();
@@ -353,7 +357,11 @@ impl InstanceDetailState {
             0.5,
             format!("Updating {}...", update.filename),
         ))));
-        let catalog = CatalogClient::new(settings.effective_curseforge_api_key());
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let paths = paths.clone();
         let pid = profile.id.clone();
         let mc = profile.mc_version.clone();
@@ -405,7 +413,11 @@ impl InstanceDetailState {
             format!("Updating {} item(s)...", list.len()),
         ))));
 
-        let catalog = CatalogClient::new(settings.effective_curseforge_api_key());
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let paths = paths.clone();
         let pid = profile.id.clone();
         let mc = profile.mc_version.clone();
@@ -1057,6 +1069,14 @@ impl InstanceDetailState {
                                         }
                                         Some(ContentSource::CurseForge) => {
                                             theme::term_badge(ui, "CF", palette.cf, palette.cf_bg);
+                                        }
+                                        Some(ContentSource::GitHub) => {
+                                            theme::term_badge(
+                                                ui,
+                                                "GH",
+                                                palette.meta,
+                                                palette.meta_bg,
+                                            );
                                         }
                                         None => {
                                             theme::term_badge_bordered(

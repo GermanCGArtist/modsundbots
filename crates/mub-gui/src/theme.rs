@@ -78,6 +78,7 @@ pub enum ButtonTone {
     Focus,
     Modrinth,
     CurseForge,
+    GitHub,
     Bot,
     Player,
     Warn,
@@ -629,6 +630,14 @@ pub fn term_button(
             palette.cf,
             palette.cf,
             palette.cf,
+            solid_fg,
+        ),
+        ButtonTone::GitHub => (
+            palette.meta_bg,
+            palette.meta,
+            palette.meta,
+            palette.meta,
+            palette.meta,
             solid_fg,
         ),
         ButtonTone::Bot => (
