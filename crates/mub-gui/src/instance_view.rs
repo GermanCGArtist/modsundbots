@@ -89,6 +89,7 @@ struct SettingsDraft {
     use_resolution: bool,
     res_width: u32,
     res_height: u32,
+    hide_window: bool,
     quick_connect: String,
 }
 
@@ -125,6 +126,7 @@ impl SettingsDraft {
             use_resolution,
             res_width,
             res_height,
+            hide_window: p.hides_window(),
             quick_connect: p.quick_connect.clone().unwrap_or_default(),
         }
     }
@@ -289,7 +291,11 @@ impl InstanceDetailState {
             0.25,
             format!("Hashing & checking updates for {}...", profile.name),
         ))));
-        let catalog = CatalogClient::new(settings.effective_curseforge_api_key());
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let paths = paths.clone();
         let pid = profile.id.clone();
         let mc = profile.mc_version.clone();
@@ -353,7 +359,11 @@ impl InstanceDetailState {
             0.5,
             format!("Updating {}...", update.filename),
         ))));
-        let catalog = CatalogClient::new(settings.effective_curseforge_api_key());
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let paths = paths.clone();
         let pid = profile.id.clone();
         let mc = profile.mc_version.clone();
@@ -405,7 +415,11 @@ impl InstanceDetailState {
             format!("Updating {} item(s)...", list.len()),
         ))));
 
-        let catalog = CatalogClient::new(settings.effective_curseforge_api_key());
+        let catalog = CatalogClient::with_github(
+            settings.effective_curseforge_api_key(),
+            settings.effective_github_update_token(),
+            settings.github_mod_repos.clone(),
+        );
         let paths = paths.clone();
         let pid = profile.id.clone();
         let mc = profile.mc_version.clone();
@@ -1057,6 +1071,14 @@ impl InstanceDetailState {
                                         }
                                         Some(ContentSource::CurseForge) => {
                                             theme::term_badge(ui, "CF", palette.cf, palette.cf_bg);
+                                        }
+                                        Some(ContentSource::GitHub) => {
+                                            theme::term_badge(
+                                                ui,
+                                                "GH",
+                                                palette.meta,
+                                                palette.meta_bg,
+                                            );
                                         }
                                         None => {
                                             theme::term_badge_bordered(
@@ -1757,6 +1779,19 @@ impl InstanceDetailState {
                             );
                         }
                     });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        theme::term_toggle(
+                            ui,
+                            palette,
+                            &mut draft.hide_window,
+                            "HIDE WINDOW (watch on WALL)",
+                            palette.bot,
+                        )
+                        .on_hover_text(
+                            "The game window never shows on the desktop or taskbar; see it on the WALL tab and click it to play. Default: on for bots.",
+                        );
+                    });
                 });
             });
 
@@ -1856,6 +1891,11 @@ impl InstanceDetailState {
                         } else {
                             None
                         };
+                        // Store only a deviation from the kind's default, so changing the kind later
+                        // still picks the right default.
+                        let kind_default = matches!(draft.kind, ProfileKind::Bot);
+                        updated.hide_window =
+                            (draft.hide_window != kind_default).then_some(draft.hide_window);
                         updated.quick_connect = {
                             let qc = draft.quick_connect.trim();
                             if qc.is_empty() {

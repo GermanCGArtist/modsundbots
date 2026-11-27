@@ -4,6 +4,7 @@ mod instance_view;
 mod markdown;
 mod mods_view;
 mod theme;
+mod wall_view;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ use mub_core::{
     list_installed_content, open_in_file_manager, spawn_updated_relaunch,
 };
 use theme::{ButtonTone, NavIcon, Palette, ThemePreset};
+use wall_view::{WallAction, WallState};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,6 +526,7 @@ enum ActiveView {
     Discover,
     Accounts,
     Console,
+    Wall,
     Config,
 }
 
@@ -647,6 +650,9 @@ struct MubApp {
     live_auth_code_input: String,
     confirm_delete_account: Option<String>,
 
+    // Bot Wall (live thumbnails of running instances)
+    wall: WallState,
+
     // Console state
     console_profile_id: Option<String>,
     console_filter: LogLevelFilter,
@@ -706,6 +712,30 @@ impl MubApp {
             }
         });
 
+        // Re-attach to games started earlier (mub closed or crashed while they ran) and pick up
+        // games started by the CLI or MCP server, so they appear on the Wall too.
+        let mgr_adopt = manager.clone();
+        let paths_adopt = paths.clone();
+        let tx_adopt = tx.clone();
+        let ctx_adopt = cc.egui_ctx.clone();
+        rt.spawn(async move {
+            let mut first = true;
+            loop {
+                let n = mgr_adopt.adopt_running(&paths_adopt).await;
+                if n > 0 {
+                    let msg = if first {
+                        format!("Re-attached to {n} running instance(s)")
+                    } else {
+                        format!("Picked up {n} instance(s) started outside the GUI")
+                    };
+                    let _ = tx_adopt.send(BgEvent::Toast(ToastTone::Bot, msg));
+                    ctx_adopt.request_repaint();
+                }
+                first = false;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+
         // Initial background Java detection so dropdowns are ready
         let tx_java = tx.clone();
         let ctx_java = cc.egui_ctx.clone();
@@ -757,7 +787,12 @@ impl MubApp {
             edit_col_desc: String::new(),
             edit_col_stagger: String::new(),
             theme_preset,
-            active_view: ActiveView::Instances,
+            // MUB_START_VIEW=wall opens the GUI on the Wall (handy for a bot PC / screenshots).
+            active_view: match std::env::var("MUB_START_VIEW").as_deref() {
+                Ok("wall") => ActiveView::Wall,
+                Ok("console") => ActiveView::Console,
+                _ => ActiveView::Instances,
+            },
             target_profile_id: first_profile_id.clone(),
             profile_filter: ProfileFilter::All,
             search_query: String::new(),
@@ -797,6 +832,7 @@ impl MubApp {
             pending_live_auth: None,
             live_auth_code_input: String::new(),
             confirm_delete_account: None,
+            wall: WallState::new(&cc.egui_ctx),
             console_profile_id: first_profile_id,
             console_filter: LogLevelFilter::All,
             console_search: String::new(),
@@ -1098,26 +1134,39 @@ impl MubApp {
         let tx = self.tx.clone();
 
         self.rt.spawn(async move {
-            let client = MsaAuthClient::new(&settings.msa_client_id);
-            let mut prepared_items = Vec::with_capacity(items.len());
-            for (p, mut acc) in items {
-                if acc.is_msa() && !acc.is_token_valid() {
-                    match client.refresh_account(&acc).await {
-                        Ok(refreshed) => {
-                            acc = refreshed.clone();
-                            let _ = tx.send(BgEvent::AccountRefreshed(refreshed));
+            let mut refresh_set = tokio::task::JoinSet::new();
+            for (idx, (p, acc)) in items.into_iter().enumerate() {
+                let msa_client_id = settings.msa_client_id.clone();
+                let tx_ref = tx.clone();
+                refresh_set.spawn(async move {
+                    if acc.is_msa() && !acc.is_token_valid() {
+                        let client = MsaAuthClient::new(&msa_client_id);
+                        match client.refresh_account(&acc).await {
+                            Ok(refreshed) => {
+                                let _ = tx_ref.send(BgEvent::AccountRefreshed(refreshed.clone()));
+                                Some((idx, (p, refreshed)))
+                            }
+                            Err(e) => {
+                                let _ = tx_ref.send(BgEvent::Toast(
+                                    ToastTone::Danger,
+                                    format!("Token refresh failed for {}: {e}", acc.username),
+                                ));
+                                None
+                            }
                         }
-                        Err(e) => {
-                            let _ = tx.send(BgEvent::Toast(
-                                ToastTone::Danger,
-                                format!("Token refresh failed for {}: {e}", acc.username),
-                            ));
-                            continue;
-                        }
+                    } else {
+                        Some((idx, (p, acc)))
                     }
-                }
-                prepared_items.push((p, acc));
+                });
             }
+            let mut indexed = Vec::new();
+            while let Some(res) = refresh_set.join_next().await {
+                if let Ok(Some(pair)) = res {
+                    indexed.push(pair);
+                }
+            }
+            indexed.sort_by_key(|(idx, _)| *idx);
+            let prepared_items: Vec<_> = indexed.into_iter().map(|(_, item)| item).collect();
             let results = mgr
                 .launch_batch_with_stagger(&paths, &settings, prepared_items, stagger_ms_override)
                 .await;
@@ -1282,6 +1331,8 @@ impl MubApp {
         let total_profiles = profiles.len();
         let paths = self.paths.clone();
         let cf_key = self.settings.effective_curseforge_api_key();
+        let gh_token = self.settings.effective_github_update_token();
+        let gh_repos = self.settings.github_mod_repos.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
 
@@ -1291,7 +1342,7 @@ impl MubApp {
         ))));
 
         self.rt.spawn(async move {
-            let catalog = CatalogClient::new(cf_key);
+            let catalog = CatalogClient::with_github(cf_key, gh_token, gh_repos);
             let mut map = HashMap::new();
             let kinds = [
                 ContentKind::Mod,
@@ -1581,6 +1632,7 @@ impl MubApp {
                     .unwrap_or_else(|| "all".to_string());
                 format!("~/console/{name}")
             }
+            ActiveView::Wall => "~/wall".to_string(),
             ActiveView::Config => "~/config".to_string(),
         }
     }
@@ -1877,6 +1929,13 @@ impl eframe::App for MubApp {
                 let inst_badge = format!("[{:02}]", self.profiles.profiles.len());
                 let col_badge = format!("[{:02}]", self.collections.collections.len());
                 let acct_badge = format!("[{:02}]", self.accounts.accounts.len());
+                let wall_badge = format!(
+                    "[{:02}]",
+                    self.statuses
+                        .values()
+                        .filter(|s| matches!(s.state, InstanceState::Running))
+                        .count()
+                );
                 let active_group = match self.active_view {
                     ActiveView::InstanceDetail => ActiveView::Instances,
                     other => other,
@@ -1934,8 +1993,16 @@ impl eframe::App for MubApp {
                         palette.mr,
                     ),
                     (
-                        ActiveView::Config,
+                        ActiveView::Wall,
                         "06",
+                        NavIcon::Wall,
+                        "WALL",
+                        Some(wall_badge.as_str()),
+                        palette.bot,
+                    ),
+                    (
+                        ActiveView::Config,
+                        "07",
                         NavIcon::Config,
                         "CONFIG",
                         config_badge,
@@ -2222,12 +2289,16 @@ impl eframe::App for MubApp {
                         &self.rt,
                         &self.paths,
                         &self.profiles,
-                        self.settings.effective_curseforge_api_key(),
+                        &self.settings,
                     );
                     self.handle_mods_actions(actions);
                 }
                 ActiveView::Accounts => self.ui_accounts(ui, &palette),
                 ActiveView::Console => self.ui_console(ui, &palette),
+                ActiveView::Wall => {
+                    let actions = self.wall.ui(ui, &palette, &self.statuses, &self.profiles);
+                    self.handle_wall_actions(actions);
+                }
                 ActiveView::Config => self.ui_config(ui, ctx, &palette),
             });
 
@@ -2280,6 +2351,64 @@ impl eframe::App for MubApp {
 }
 
 impl MubApp {
+    fn handle_wall_actions(&mut self, actions: Vec<WallAction>) {
+        for action in actions {
+            match action {
+                WallAction::Show(id) => {
+                    let mgr = self.manager.clone();
+                    self.rt.spawn(async move {
+                        mgr.set_window_hidden(&id, false, true).await;
+                    });
+                }
+                WallAction::Hide(id) => {
+                    let mgr = self.manager.clone();
+                    self.rt.spawn(async move {
+                        mgr.set_window_hidden(&id, true, false).await;
+                    });
+                }
+                WallAction::HideAllBots | WallAction::ShowAll => {
+                    let hide = matches!(action, WallAction::HideAllBots);
+                    let ids: Vec<String> = self
+                        .statuses
+                        .values()
+                        .filter(|s| matches!(s.state, InstanceState::Running))
+                        .filter(|s| {
+                            !hide
+                                || self
+                                    .profiles
+                                    .get(&s.profile_id)
+                                    .map(|p| p.kind == ProfileKind::Bot)
+                                    .unwrap_or(true)
+                        })
+                        .map(|s| s.profile_id.clone())
+                        .collect();
+                    let mgr = self.manager.clone();
+                    self.rt.spawn(async move {
+                        for id in ids {
+                            mgr.set_window_hidden(&id, hide, false).await;
+                        }
+                    });
+                }
+                WallAction::UnhideOrphans => {
+                    let tx = self.tx.clone();
+                    self.rt.spawn(async move {
+                        let n = tokio::task::spawn_blocking(mub_core::window::unhide_all_java)
+                            .await
+                            .unwrap_or(0);
+                        let _ = tx.send(BgEvent::Toast(
+                            ToastTone::Focus,
+                            format!("Showed {n} hidden game window(s)"),
+                        ));
+                    });
+                }
+                WallAction::OpenConsole(id) => {
+                    self.console_profile_id = Some(id);
+                    self.active_view = ActiveView::Console;
+                }
+            }
+        }
+    }
+
     fn handle_instance_actions(&mut self, actions: Vec<InstanceAction>) {
         for action in actions {
             match action {
@@ -2423,7 +2552,8 @@ impl MubApp {
                         ),
                         ("> go accounts", "04 ACCOUNTS", palette.player, 3),
                         ("> go console", "05 CONSOLE", palette.mr, 4),
-                        ("> go config", "06 CONFIG", palette.meta, 5),
+                        ("> go wall (bot thumbnails)", "06 WALL", palette.bot, 9),
+                        ("> go config", "07 CONFIG", palette.meta, 5),
                         ("> launch all bots (staggered)", "SWARM", palette.bot, 6),
                         ("> stop all active instances", "SIGKILL", palette.danger, 7),
                     ];
@@ -2443,6 +2573,7 @@ impl MubApp {
                                 6 => self.launch_all_bots(),
                                 7 => self.stop_all(),
                                 8 => self.active_view = ActiveView::Collections,
+                                9 => self.active_view = ActiveView::Wall,
                                 _ => {}
                             }
                         }
@@ -4641,8 +4772,13 @@ impl MubApp {
                                         palette.mr_bg,
                                     );
                                 }
+                                let launch_mode_label = if stagger_eff == 0 {
+                                    "parallel".to_string()
+                                } else {
+                                    format!("stagger: {stagger_eff}ms")
+                                };
                                 ui.label(
-                                    RichText::new(format!("stagger: {stagger_eff}ms"))
+                                    RichText::new(launch_mode_label)
                                         .monospace()
                                         .size(10.5)
                                         .color(palette.ink_muted),

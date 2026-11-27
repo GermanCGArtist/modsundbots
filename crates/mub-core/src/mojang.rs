@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use futures_util::stream::{self, StreamExt};
 use reqwest::Client;
@@ -303,100 +303,141 @@ impl VersionManager {
         let version_dir = paths.versions_dir().join(mc_version);
         std::fs::create_dir_all(&version_dir)?;
 
-        on_progress(format!("Fetching version metadata for {mc_version}..."));
-        let meta_path = version_dir.join(format!("{mc_version}.json"));
-        let meta: VersionMeta = if meta_path.exists() {
-            serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?
-        } else {
-            let manifest = self.fetch_manifest().await?;
-            let entry = manifest
-                .versions
-                .into_iter()
-                .find(|v| v.id == mc_version)
-                .ok_or_else(|| {
-                    MubError::Download(format!("Minecraft version '{mc_version}' not found"))
-                })?;
-            let raw = self.http.get(&entry.url).send().await?.text().await?;
-            std::fs::write(&meta_path, &raw)?;
-            serde_json::from_str(&raw)?
+        // Serialize shared downloads/metadata writes for the same MC version so
+        // parallel collection launches never race on shared files in `shared/`.
+        // A short-lived in-memory cache avoids re-hashing thousands of asset files
+        // when starting multiple profiles of the same MC version in parallel.
+        let (meta, mut classpath, native_jars, client_jar) = {
+            let lock = shared_prep_lock(&format!("vanilla:{mc_version}"));
+            let _guard = lock.lock().await;
+
+            let cache_key = (paths.root.clone(), mc_version.to_string());
+            if let Some(cached) = get_cached_vanilla(&cache_key)
+                && cached.client_jar.exists()
+            {
+                on_progress(format!("Using verified files for {mc_version}..."));
+                (
+                    cached.meta,
+                    cached.classpath,
+                    cached.native_jars,
+                    cached.client_jar,
+                )
+            } else {
+                on_progress(format!("Fetching version metadata for {mc_version}..."));
+                let meta_path = version_dir.join(format!("{mc_version}.json"));
+                let meta: VersionMeta = if meta_path.exists() {
+                    serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?
+                } else {
+                    let manifest = self.fetch_manifest().await?;
+                    let entry = manifest
+                        .versions
+                        .into_iter()
+                        .find(|v| v.id == mc_version)
+                        .ok_or_else(|| {
+                            MubError::Download(format!("Minecraft version '{mc_version}' not found"))
+                        })?;
+                    let raw = self.http.get(&entry.url).send().await?.text().await?;
+                    atomic_write_file(&meta_path, raw.as_bytes())?;
+                    serde_json::from_str(&raw)?
+                };
+
+                // Download client.jar
+                on_progress(format!("Checking client jar ({mc_version}.jar)..."));
+                let client_jar = version_dir.join(format!("{mc_version}.jar"));
+                self.download_if_missing(
+                    &meta.downloads.client.url,
+                    &client_jar,
+                    meta.downloads.client.sha1.as_deref(),
+                )
+                .await?;
+
+                // Collect library download tasks + classpath
+                let mut classpath = Vec::new();
+                let mut download_tasks: Vec<(String, PathBuf, Option<String>)> = Vec::new();
+                let mut native_jars: Vec<PathBuf> = Vec::new();
+
+                for lib in &meta.libraries {
+                    if !rules_allow(&lib.rules) {
+                        continue;
+                    }
+                    if is_wrong_arch_native_coord(&lib.name) {
+                        continue;
+                    }
+                    if let Some(downloads) = &lib.downloads {
+                        if let Some(artifact) = &downloads.artifact {
+                            let rel = artifact
+                                .path
+                                .clone()
+                                .unwrap_or_else(|| maven_to_path(&lib.name));
+                            let dest = paths.libraries_dir().join(&rel);
+                            classpath.push(dest.clone());
+                            if is_current_arch_native_coord(&lib.name) {
+                                native_jars.push(dest.clone());
+                            }
+                            download_tasks.push((artifact.url.clone(), dest, artifact.sha1.clone()));
+                        }
+                        if let Some(native_art) =
+                            select_native_classifier(lib, &downloads.classifiers)
+                        {
+                            let rel = native_art
+                                .path
+                                .clone()
+                                .unwrap_or_else(|| maven_to_path(&lib.name));
+                            let dest = paths.libraries_dir().join(&rel);
+                            native_jars.push(dest.clone());
+                            download_tasks.push((
+                                native_art.url.clone(),
+                                dest,
+                                native_art.sha1.clone(),
+                            ));
+                        }
+                    }
+                }
+
+                // Download asset index
+                on_progress(format!("Checking asset index {}...", meta.asset_index.id));
+                let indexes_dir = paths.assets_dir().join("indexes");
+                std::fs::create_dir_all(&indexes_dir)?;
+                let index_path = indexes_dir.join(format!("{}.json", meta.asset_index.id));
+                self.download_if_missing(
+                    &meta.asset_index.url,
+                    &index_path,
+                    Some(&meta.asset_index.sha1),
+                )
+                .await?;
+
+                let asset_index: AssetIndex =
+                    serde_json::from_str(&std::fs::read_to_string(&index_path)?)?;
+                let objects_dir = paths.assets_dir().join("objects");
+                for obj in asset_index.objects.values() {
+                    let prefix = &obj.hash[..2];
+                    let dest = objects_dir.join(prefix).join(&obj.hash);
+                    let url = format!("{RESOURCES_BASE_URL}/{prefix}/{}", obj.hash);
+                    download_tasks.push((url, dest, Some(obj.hash.clone())));
+                }
+
+                // Execute all downloads concurrently with progress reporting
+                let total = download_tasks.len();
+                on_progress(format!("Verifying/downloading {total} files..."));
+                self.run_download_batch(download_tasks, max_concurrent, &on_progress)
+                    .await?;
+
+                put_cached_vanilla(
+                    cache_key,
+                    CachedVanilla {
+                        meta: meta.clone(),
+                        classpath: classpath.clone(),
+                        native_jars: native_jars.clone(),
+                        client_jar: client_jar.clone(),
+                        verified_at: std::time::Instant::now(),
+                    },
+                );
+
+                (meta, classpath, native_jars, client_jar)
+            }
         };
 
-        // Download client.jar
-        on_progress(format!("Checking client jar ({mc_version}.jar)..."));
-        let client_jar = version_dir.join(format!("{mc_version}.jar"));
-        self.download_if_missing(
-            &meta.downloads.client.url,
-            &client_jar,
-            meta.downloads.client.sha1.as_deref(),
-        )
-        .await?;
-
-        // Collect library download tasks + classpath
-        let mut classpath = Vec::new();
-        let mut download_tasks: Vec<(String, PathBuf, Option<String>)> = Vec::new();
-        let mut native_jars: Vec<PathBuf> = Vec::new();
-
-        for lib in &meta.libraries {
-            if !rules_allow(&lib.rules) {
-                continue;
-            }
-            if is_wrong_arch_native_coord(&lib.name) {
-                continue;
-            }
-            if let Some(downloads) = &lib.downloads {
-                if let Some(artifact) = &downloads.artifact {
-                    let rel = artifact
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| maven_to_path(&lib.name));
-                    let dest = paths.libraries_dir().join(&rel);
-                    classpath.push(dest.clone());
-                    if is_current_arch_native_coord(&lib.name) {
-                        native_jars.push(dest.clone());
-                    }
-                    download_tasks.push((artifact.url.clone(), dest, artifact.sha1.clone()));
-                }
-                if let Some(native_art) = select_native_classifier(lib, &downloads.classifiers) {
-                    let rel = native_art
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| maven_to_path(&lib.name));
-                    let dest = paths.libraries_dir().join(&rel);
-                    native_jars.push(dest.clone());
-                    download_tasks.push((native_art.url.clone(), dest, native_art.sha1.clone()));
-                }
-            }
-        }
-
-        // Download asset index
-        on_progress(format!("Checking asset index {}...", meta.asset_index.id));
-        let indexes_dir = paths.assets_dir().join("indexes");
-        std::fs::create_dir_all(&indexes_dir)?;
-        let index_path = indexes_dir.join(format!("{}.json", meta.asset_index.id));
-        self.download_if_missing(
-            &meta.asset_index.url,
-            &index_path,
-            Some(&meta.asset_index.sha1),
-        )
-        .await?;
-
-        let asset_index: AssetIndex =
-            serde_json::from_str(&std::fs::read_to_string(&index_path)?)?;
-        let objects_dir = paths.assets_dir().join("objects");
-        for obj in asset_index.objects.values() {
-            let prefix = &obj.hash[..2];
-            let dest = objects_dir.join(prefix).join(&obj.hash);
-            let url = format!("{RESOURCES_BASE_URL}/{prefix}/{}", obj.hash);
-            download_tasks.push((url, dest, Some(obj.hash.clone())));
-        }
-
-        // Execute all downloads concurrently with progress reporting
-        let total = download_tasks.len();
-        on_progress(format!("Verifying/downloading {total} files..."));
-        self.run_download_batch(download_tasks, max_concurrent, &on_progress)
-            .await?;
-
-        // Extract natives into instance-specific natives dir
+        // Extract natives into instance-specific natives dir (runs in parallel across instances)
         on_progress("Extracting natives...".to_string());
         std::fs::create_dir_all(natives_dir)?;
         for jar_path in native_jars {
@@ -405,6 +446,16 @@ impl VersionManager {
             }
         }
 
+        // Collect vanilla JVM arguments (e.g. -XX:StackShadowPages=32, --enable-native-access,
+        // --add-exports, per-instance JNA/LWJGL/Netty native temp dirs) and ensure per-instance
+        // native extraction subdirectories exist so parallel JVMs never collide in %TEMP%.
+        let mut extra_jvm_args = meta
+            .arguments
+            .as_ref()
+            .map(|a| collect_vanilla_jvm_args(&a.jvm, paths, &meta.id, natives_dir))
+            .unwrap_or_default();
+        ensure_isolated_native_jvm_args(&mut extra_jvm_args, natives_dir)?;
+
         classpath.push(client_jar);
 
         Ok(PreparedVersion {
@@ -412,7 +463,7 @@ impl VersionManager {
             main_class: meta.main_class,
             asset_index_id: meta.asset_index.id,
             classpath,
-            extra_jvm_args: Vec::new(),
+            extra_jvm_args,
             extra_game_args: Vec::new(),
         })
     }
@@ -511,6 +562,9 @@ impl VersionManager {
     where
         F: Fn(String) + Send + Sync,
     {
+        let lock = shared_prep_lock(&format!("loader:{url}"));
+        let _guard = lock.lock().await;
+
         let resp = self.http.get(url).send().await?;
         if !resp.status().is_success() {
             return Err(MubError::Download(format!(
@@ -585,6 +639,9 @@ impl VersionManager {
                 on_progress.clone(),
             )
             .await?;
+
+        let lock = shared_prep_lock(&format!("neoforge:{loader_version}"));
+        let _guard = lock.lock().await;
 
         let nf_version_id = format!("neoforge-{loader_version}");
         let nf_dir = paths.versions_dir().join(&nf_version_id);
@@ -800,8 +857,79 @@ impl VersionManager {
             }
         }
 
-        std::fs::write(dest, &bytes)?;
+        atomic_write_file(dest, &bytes)?;
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct CachedVanilla {
+    meta: VersionMeta,
+    classpath: Vec<PathBuf>,
+    native_jars: Vec<PathBuf>,
+    client_jar: PathBuf,
+    verified_at: std::time::Instant,
+}
+
+const VANILLA_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn vanilla_cache() -> &'static std::sync::Mutex<HashMap<(PathBuf, String), CachedVanilla>> {
+    static CACHE: OnceLock<std::sync::Mutex<HashMap<(PathBuf, String), CachedVanilla>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn get_cached_vanilla(key: &(PathBuf, String)) -> Option<CachedVanilla> {
+    let map = vanilla_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let entry = map.get(key)?;
+    if entry.verified_at.elapsed() <= VANILLA_CACHE_TTL {
+        Some(entry.clone())
+    } else {
+        None
+    }
+}
+
+fn put_cached_vanilla(key: (PathBuf, String), value: CachedVanilla) {
+    let mut map = vanilla_cache().lock().unwrap_or_else(|e| e.into_inner());
+    map.insert(key, value);
+}
+
+fn shared_prep_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .entry(key.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn atomic_write_file(dest: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let tmp = dest.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    match std::fs::rename(&tmp, dest) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if dest.exists() {
+                let _ = std::fs::remove_file(dest);
+                if std::fs::rename(&tmp, dest).is_ok() {
+                    return Ok(());
+                }
+            }
+            let _ = std::fs::remove_file(&tmp);
+            Err(e.into())
+        }
     }
 }
 
@@ -1017,6 +1145,8 @@ fn collect_allowed_args(
             .replace("${classpath_separator}", cp_sep)
             .replace("${version_name}", version_name)
             .replace("${natives_directory}", &natives_str)
+            .replace("${launcher_name}", "ModsUndBots")
+            .replace("${launcher_version}", "0.2.0")
     };
 
     let mut out = Vec::new();
@@ -1114,6 +1244,53 @@ fn maven_to_path(coord: &str) -> String {
     }
 }
 
+fn collect_vanilla_jvm_args(
+    items: &[serde_json::Value],
+    paths: &AppPaths,
+    version_name: &str,
+    natives_dir: &Path,
+) -> Vec<String> {
+    let raw = collect_allowed_args(items, paths, version_name, natives_dir);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut iter = raw.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-cp" || arg == "-classpath" {
+            // Skip `-cp` and its `${classpath}` value; launcher.rs supplies the merged classpath.
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("-Djava.library.path=")
+            || arg.starts_with("-Dminecraft.launcher.brand=")
+            || arg.starts_with("-Dminecraft.launcher.version=")
+        {
+            continue;
+        }
+        out.push(arg);
+    }
+    out
+}
+
+fn ensure_isolated_native_jvm_args(extra_jvm_args: &mut Vec<String>, natives_dir: &Path) -> Result<()> {
+    let jna_dir = natives_dir.join("jna");
+    let lwjgl_dir = natives_dir.join("lwjgl");
+    let netty_dir = natives_dir.join("netty");
+    std::fs::create_dir_all(&jna_dir)?;
+    std::fs::create_dir_all(&lwjgl_dir)?;
+    std::fs::create_dir_all(&netty_dir)?;
+
+    let defaults = [
+        ("-Djna.tmpdir=", jna_dir),
+        ("-Dorg.lwjgl.system.SharedLibraryExtractPath=", lwjgl_dir),
+        ("-Dio.netty.native.workdir=", netty_dir),
+    ];
+    for (prefix, dir) in defaults {
+        if !extra_jvm_args.iter().any(|a| a.starts_with(prefix)) {
+            extra_jvm_args.push(format!("{prefix}{}", dir.display()));
+        }
+    }
+    Ok(())
+}
+
 fn extract_natives(jar_path: &Path, natives_dir: &Path) -> Result<()> {
     let file = std::fs::File::open(jar_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -1127,8 +1304,85 @@ fn extract_natives(jar_path: &Path, natives_dir: &Path) -> Result<()> {
             continue;
         };
         let out_path = natives_dir.join(file_name);
-        let mut out_file = std::fs::File::create(out_path)?;
-        std::io::copy(&mut entry, &mut out_file)?;
+        if let Ok(meta) = std::fs::metadata(&out_path)
+            && meta.len() == entry.size()
+        {
+            continue;
+        }
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        std::io::Read::read_to_end(&mut entry, &mut buf)?;
+        atomic_write_file(&out_path, &buf)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vanilla_jvm_args_preserves_critical_flags_and_filters_managed() {
+        let tmp = std::env::temp_dir().join(format!("mub_mojang_test_{}", uuid::Uuid::new_v4()));
+        let paths = AppPaths::from_root(&tmp);
+        let natives_dir = paths.natives_dir("prof-1");
+
+        let jvm_json: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+                "-XX:StackShadowPages=32",
+                "--enable-native-access=ALL-UNNAMED",
+                "--add-exports",
+                "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "-Djava.library.path=${natives_directory}/java",
+                "-Djna.tmpdir=${natives_directory}/jna",
+                "-Dorg.lwjgl.system.SharedLibraryExtractPath=${natives_directory}/lwjgl",
+                "-Dio.netty.native.workdir=${natives_directory}/netty",
+                "-Dminecraft.launcher.brand=${launcher_name}",
+                "-Dminecraft.launcher.version=${launcher_version}",
+                "-cp",
+                "${classpath}"
+            ]"#,
+        )
+        .unwrap();
+
+        let mut args = collect_vanilla_jvm_args(&jvm_json, &paths, "26.3", &natives_dir);
+        ensure_isolated_native_jvm_args(&mut args, &natives_dir).unwrap();
+
+        assert!(args.contains(&"-XX:StackShadowPages=32".to_string()));
+        assert!(args.contains(&"--enable-native-access=ALL-UNNAMED".to_string()));
+        assert!(args.contains(&"--add-exports".to_string()));
+        assert!(args.contains(&"java.base/jdk.internal.misc=ALL-UNNAMED".to_string()));
+        assert!(args.iter().any(|a| a.starts_with("-Djna.tmpdir=")));
+        assert!(args
+            .iter()
+            .any(|a| a.starts_with("-Dorg.lwjgl.system.SharedLibraryExtractPath=")));
+        assert!(args
+            .iter()
+            .any(|a| a.starts_with("-Dio.netty.native.workdir=")));
+
+        assert!(!args.iter().any(|a| a == "-cp" || a == "${classpath}"));
+        assert!(!args.iter().any(|a| a.starts_with("-Djava.library.path=")));
+        assert!(!args
+            .iter()
+            .any(|a| a.starts_with("-Dminecraft.launcher.brand=")));
+        assert!(!args
+            .iter()
+            .any(|a| a.starts_with("-Dminecraft.launcher.version=")));
+
+        assert!(natives_dir.join("jna").is_dir());
+        assert!(natives_dir.join("lwjgl").is_dir());
+        assert!(natives_dir.join("netty").is_dir());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn atomic_write_overwrites_cleanly() {
+        let tmp = std::env::temp_dir().join(format!("mub_atomic_{}", uuid::Uuid::new_v4()));
+        let file = tmp.join("nested").join("data.bin");
+        atomic_write_file(&file, b"first").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"first");
+        atomic_write_file(&file, b"second-version").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"second-version");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

@@ -3,13 +3,16 @@ pub mod catalog;
 pub mod collection;
 pub mod curseforge;
 pub mod error;
+pub mod github;
 pub mod java;
 pub mod launcher;
+pub mod window;
 pub mod modpack;
 pub mod modrinth;
 pub mod mojang;
 pub mod paths;
 pub mod profile;
+pub mod running;
 pub mod updater;
 
 pub use account::{Account, AccountRole, AccountStore, DeviceCodeResponse, MsaAuthClient};
@@ -28,11 +31,15 @@ pub use curseforge::{
     MC_GAME_ID, compute_murmur2_fingerprint,
 };
 pub use error::{MubError, Result};
+pub use github::{
+    DEFAULT_GITHUB_OWNER, FEATURED_GITHUB_REPOS, GhAsset, GhRelease, GhRepo, GitHubClient,
+};
 pub use java::{
     JavaInstallation, detect_java_installations, pick_best_java, required_java_major,
     resolve_java_for_mc,
 };
 pub use launcher::{InstanceManager, InstanceState, InstanceStatus, prepare_profile_version};
+pub use running::{RunningRecord, RunningStore};
 pub use modpack::{
     ModpackImportResult, MrpackEnv, MrpackFile, MrpackIndex, RestrictedPackFile, export_mrpack,
     import_curseforge_pack, import_mrpack, install_modpack_from_catalog,
@@ -201,6 +208,9 @@ mod tests {
         assert_eq!(required_java_major("1.16.5"), 8);
         assert_eq!(required_java_major("1.12.2"), 8);
         assert_eq!(required_java_major("24w14a"), 21);
+        assert_eq!(required_java_major("26.1.1"), 25);
+        assert_eq!(required_java_major("26.3"), 25);
+        assert_eq!(required_java_major("26.1-snapshot-1"), 25);
 
         let installs = vec![
             JavaInstallation {

@@ -64,6 +64,11 @@ enum Commands {
         #[command(subcommand)]
         action: CollectionAction,
     },
+    /// Hide, show or list the game windows of running instances (see the WALL tab in the GUI)
+    Windows {
+        #[command(subcommand)]
+        action: WindowsAction,
+    },
     /// Run an MCP (Model Context Protocol) JSON-RPC 2.0 server over stdio
     Mcp,
     /// Check for and install ModsUndBots updates from GitHub Releases
@@ -74,6 +79,22 @@ enum Commands {
         /// Optional GitHub PAT (overrides settings / MUB_GITHUB_TOKEN for private repo)
         #[arg(long)]
         token: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WindowsAction {
+    /// List running instances and whether their window is hidden
+    List,
+    /// Hide the window of a running instance (name or ID)
+    Hide { profile: String },
+    /// Show a running instance's window and bring it to the front
+    Show { profile: String },
+    /// Show every hidden Java game window on this PC (safety net if the GUI crashed)
+    Unhide {
+        /// Required: show all of them
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -199,6 +220,7 @@ enum CliSource {
     All,
     Modrinth,
     Curseforge,
+    Github,
 }
 
 impl From<CliSource> for SourceFilter {
@@ -207,6 +229,7 @@ impl From<CliSource> for SourceFilter {
             CliSource::All => SourceFilter::All,
             CliSource::Modrinth => SourceFilter::Modrinth,
             CliSource::Curseforge => SourceFilter::CurseForge,
+            CliSource::Github => SourceFilter::GitHub,
         }
     }
 }
@@ -369,6 +392,7 @@ async fn main() -> Result<()> {
         Commands::Pack { action } => handle_pack(action, &paths, &settings).await?,
         Commands::Java { action } => handle_java(action),
         Commands::Collection { action } => handle_collection(action, &paths, &settings).await?,
+        Commands::Windows { action } => handle_windows(action, &paths)?,
         Commands::Mcp => unreachable!(),
         Commands::Update { check, token } => handle_update(check, token, &settings).await?,
     }
@@ -617,6 +641,57 @@ async fn resolve_account(
     Ok(acc)
 }
 
+fn handle_windows(action: WindowsAction, paths: &AppPaths) -> Result<()> {
+    use mub_core::{RunningStore, window};
+    let running = RunningStore::alive(&paths.running_file());
+    let find = |query: &str| -> Result<mub_core::RunningRecord> {
+        let profiles = ProfileStore::load(&paths.profiles_file()).unwrap_or_default();
+        let id = profiles
+            .get(query)
+            .or_else(|| profiles.find_by_name(query))
+            .map(|p| p.id.clone())
+            .unwrap_or_else(|| query.to_string());
+        running
+            .iter()
+            .find(|r| r.profile_id == id || r.profile_name.eq_ignore_ascii_case(query))
+            .cloned()
+            .with_context(|| format!("'{query}' is not running (or was not started by mub)"))
+    };
+    match action {
+        WindowsAction::List => {
+            if running.is_empty() {
+                println!("No running instances started by mub.");
+            }
+            for r in &running {
+                let state = match window::pid_hidden(r.pid) {
+                    Some(true) => "hidden",
+                    Some(false) => "shown",
+                    None => "no window",
+                };
+                println!("{:<24} pid {:<7} {:<9} {}", r.profile_name, r.pid, state, r.account_name);
+            }
+        }
+        WindowsAction::Hide { profile } => {
+            let r = find(&profile)?;
+            let n = window::hide_pid(r.pid);
+            println!("Hid {n} window(s) of {}", r.profile_name);
+        }
+        WindowsAction::Show { profile } => {
+            let r = find(&profile)?;
+            let n = window::show_pid(r.pid, true);
+            println!("Showed {n} window(s) of {}", r.profile_name);
+        }
+        WindowsAction::Unhide { all } => {
+            if !all {
+                bail!("use `mub windows unhide --all` (or `mub windows show <profile>` for one)");
+            }
+            let n = window::unhide_all_java();
+            println!("Showed {n} hidden game window(s)");
+        }
+    }
+    Ok(())
+}
+
 async fn run_and_wait(
     paths: &AppPaths,
     settings: &LauncherSettings,
@@ -640,6 +715,25 @@ async fn run_and_wait(
             )
         });
         if !any_active {
+            for s in &statuses {
+                let failed = match &s.state {
+                    mub_core::InstanceState::Failed { error } => {
+                        eprintln!("{}: failed: {error}", s.profile_name);
+                        true
+                    }
+                    mub_core::InstanceState::Stopped { exit_code } => {
+                        println!("{}: exited with code {exit_code:?}", s.profile_name);
+                        !matches!(exit_code, Some(0) | None)
+                    }
+                    _ => false,
+                };
+                if failed {
+                    let tail: Vec<&String> = s.logs.iter().rev().take(15).collect();
+                    for line in tail.into_iter().rev() {
+                        eprintln!("  | {line}");
+                    }
+                }
+            }
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -676,7 +770,24 @@ async fn resolve_catalog_version(
                 .next()
                 .with_context(|| format!("No compatible CurseForge version found for '{project}'"))
         }
+        SourceFilter::GitHub => {
+            let versions = catalog
+                .list_versions(ContentSource::GitHub, project, kind, mc_version, loader)
+                .await?;
+            versions
+                .into_iter()
+                .next()
+                .with_context(|| format!("No compatible GitHub release found for '{project}'"))
+        }
         SourceFilter::All => {
+            if mub_core::github::parse_repo_spec(project).is_some()
+                && let Ok(versions) = catalog
+                    .list_versions(ContentSource::GitHub, project, kind, mc_version, loader)
+                    .await
+                && let Some(first) = versions.into_iter().next()
+            {
+                return Ok(first);
+            }
             let is_numeric = project.chars().all(|c| c.is_ascii_digit()) && !project.is_empty();
             if is_numeric
                 && catalog.has_curseforge()
@@ -749,7 +860,11 @@ async fn handle_mods(
     settings: &LauncherSettings,
 ) -> Result<()> {
     let mut prof_store = ProfileStore::load(&paths.profiles_file())?;
-    let catalog = CatalogClient::new(settings.effective_curseforge_api_key());
+    let catalog = CatalogClient::with_github(
+        settings.effective_curseforge_api_key(),
+        settings.effective_github_update_token(),
+        settings.github_mod_repos.clone(),
+    );
 
     match action {
         ModsAction::Search {
@@ -1213,20 +1328,28 @@ async fn handle_collection(
             let col = store
                 .resolve(&collection)
                 .with_context(|| format!("Collection '{collection}' not found"))?;
+            let mut join_set = tokio::task::JoinSet::new();
             for pid in &col.profile_ids {
-                if let Some(p) = prof_store.get(pid) {
-                    println!("Preparing '{}'...", p.name);
-                    let java_bin = resolve_java_for_mc(
-                        p.java_path.as_deref(),
-                        &settings.default_java_path,
-                        &p.mc_version,
-                    );
-                    let pname = p.name.clone();
-                    prepare_profile_version(paths, settings, p, &java_bin, move |msg| {
-                        println!("  [{pname}] {msg}");
-                    })
-                    .await?;
+                if let Some(p) = prof_store.get(pid).cloned() {
+                    let paths = paths.clone();
+                    let settings = settings.clone();
+                    join_set.spawn(async move {
+                        println!("Preparing '{}'...", p.name);
+                        let java_bin = resolve_java_for_mc(
+                            p.java_path.as_deref(),
+                            &settings.default_java_path,
+                            &p.mc_version,
+                        );
+                        let pname = p.name.clone();
+                        prepare_profile_version(&paths, &settings, &p, &java_bin, move |msg| {
+                            println!("  [{pname}] {msg}");
+                        })
+                        .await
+                    });
                 }
+            }
+            while let Some(res) = join_set.join_next().await {
+                res??;
             }
             println!("Collection '{}' prepared.", col.name);
         }

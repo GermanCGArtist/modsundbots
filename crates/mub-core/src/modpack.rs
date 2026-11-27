@@ -509,6 +509,7 @@ where
             })?;
             cf.download_bytes(&download_url).await?
         }
+        ContentSource::GitHub => catalog.github().download_bytes(&download_url).await?,
     };
 
     let tmp_dir = paths.shared_dir().join("cache");

@@ -98,6 +98,10 @@ pub struct Profile {
     pub quick_connect: Option<String>,
     /// Optional window resolution (width, height).
     pub resolution: Option<(u32, u32)>,
+    /// Hide the game window (parked off-screen, no taskbar button) while it runs; watch it on the Wall.
+    /// `None` = default for the kind: bots hidden, players shown.
+    #[serde(default)]
+    pub hide_window: Option<bool>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -137,6 +141,7 @@ impl Profile {
                 ProfileKind::Player => None,
                 ProfileKind::Bot => Some((640, 360)),
             },
+            hide_window: None,
             tags: Vec::new(),
             group: None,
             playtime_secs: 0,
@@ -144,6 +149,12 @@ impl Profile {
             created_at: Utc::now(),
             last_launched_at: None,
         }
+    }
+
+    /// Whether this profile's window is hidden on launch (explicit setting, else bots only).
+    pub fn hides_window(&self) -> bool {
+        self.hide_window
+            .unwrap_or(matches!(self.kind, ProfileKind::Bot))
     }
 
     /// Clone this profile's configuration under a new ID and name.
@@ -238,6 +249,8 @@ pub struct LauncherSettings {
     pub curseforge_api_key: String,
     #[serde(default)]
     pub github_update_token: String,
+    #[serde(default)]
+    pub github_mod_repos: Vec<String>,
 }
 
 impl Default for LauncherSettings {
@@ -245,11 +258,12 @@ impl Default for LauncherSettings {
         Self {
             default_java_path: "java".to_string(),
             msa_client_id: crate::account::DEFAULT_MSA_CLIENT_ID.to_string(),
-            batch_launch_stagger_ms: 1500,
+            batch_launch_stagger_ms: 0,
             max_concurrent_downloads: 16,
             theme_palette: default_theme_palette(),
             curseforge_api_key: String::new(),
             github_update_token: String::new(),
+            github_mod_repos: Vec::new(),
         }
     }
 }

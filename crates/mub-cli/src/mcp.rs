@@ -393,7 +393,8 @@ fn tool_definitions() -> Vec<Value> {
                     "memory_max_mb": { "type": "integer" },
                     "java_path": { "type": "string" },
                     "jvm_args": { "type": "array", "items": { "type": "string" } },
-                    "tags": { "type": "array", "items": { "type": "string" } }
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "hide_window": { "type": ["boolean", "null"], "description": "Hide the game window on launch (null = default: bots hidden, players shown)" }
                 },
                 "required": ["profile"]
             }
@@ -592,6 +593,18 @@ fn tool_definitions() -> Vec<Value> {
                     "profile": { "type": "string", "description": "Profile ID, name, or 'all'" }
                 },
                 "required": ["profile"]
+            }
+        }),
+        json!({
+            "name": "set_window_hidden",
+            "description": "Hide or show the game window of a running instance (started by any mub process). Showing brings it to the front.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": { "type": "string", "description": "Profile ID or name" },
+                    "hidden": { "type": "boolean" }
+                },
+                "required": ["profile", "hidden"]
             }
         }),
         json!({
@@ -927,6 +940,9 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
                     Some(qc.to_string())
                 };
             }
+            if let Some(v) = args.get("hide_window") {
+                p.hide_window = v.as_bool();
+            }
             if let Some(min) = args.get("memory_min_mb").and_then(|v| v.as_u64()) {
                 p.memory_min_mb = min as u32;
             }
@@ -1048,7 +1064,11 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
 
             let settings = state.load_settings()?;
-            let client = CatalogClient::new(settings.effective_curseforge_api_key());
+            let client = CatalogClient::with_github(
+                settings.effective_curseforge_api_key(),
+                settings.effective_github_update_token(),
+                settings.github_mod_repos.clone(),
+            );
             let resp = client
                 .search(
                     source,
@@ -1127,12 +1147,20 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
             }
 
             let settings = state.load_settings()?;
-            let client = CatalogClient::new(settings.effective_curseforge_api_key());
+            let client = CatalogClient::with_github(
+                settings.effective_curseforge_api_key(),
+                settings.effective_github_update_token(),
+                settings.github_mod_repos.clone(),
+            );
             let content_source = match source {
                 SourceFilter::CurseForge => ContentSource::CurseForge,
                 SourceFilter::Modrinth => ContentSource::Modrinth,
+                SourceFilter::GitHub => ContentSource::GitHub,
                 SourceFilter::All => {
-                    if project.chars().all(|c| c.is_ascii_digit()) && client.has_curseforge() {
+                    if mub_core::github::parse_repo_spec(&project).is_some() {
+                        ContentSource::GitHub
+                    } else if project.chars().all(|c| c.is_ascii_digit()) && client.has_curseforge()
+                    {
                         ContentSource::CurseForge
                     } else {
                         ContentSource::Modrinth
@@ -1372,24 +1400,34 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
             let col = cols
                 .resolve(&target)
                 .ok_or_else(|| anyhow::anyhow!("Collection '{target}' not found"))?;
-            let mut results = Vec::new();
+            let mut join_set = tokio::task::JoinSet::new();
             for pid in &col.profile_ids {
-                if let Some(prof) = profiles.get(pid) {
-                    let java_bin = resolve_java_async(&settings, prof).await;
-                    match prepare_profile_version(&state.paths, &settings, prof, &java_bin, |_| {})
-                        .await
-                    {
-                        Ok(prep) => results.push(json!({
-                            "profile": prof.name,
-                            "status": "prepared",
-                            "version_id": prep.version_id,
-                        })),
-                        Err(e) => results.push(json!({
-                            "profile": prof.name,
-                            "status": "failed",
-                            "error": e.to_string(),
-                        })),
-                    }
+                if let Some(prof) = profiles.get(pid).cloned() {
+                    let paths = state.paths.clone();
+                    let settings = settings.clone();
+                    join_set.spawn(async move {
+                        let java_bin = resolve_java_async(&settings, &prof).await;
+                        match prepare_profile_version(&paths, &settings, &prof, &java_bin, |_| {})
+                            .await
+                        {
+                            Ok(prep) => json!({
+                                "profile": prof.name,
+                                "status": "prepared",
+                                "version_id": prep.version_id,
+                            }),
+                            Err(e) => json!({
+                                "profile": prof.name,
+                                "status": "failed",
+                                "error": e.to_string(),
+                            }),
+                        }
+                    });
+                }
+            }
+            let mut results = Vec::new();
+            while let Some(res) = join_set.join_next().await {
+                if let Ok(item) = res {
+                    results.push(item);
                 }
             }
             Ok(json!({ "collection": col.name, "results": results }))
@@ -1507,6 +1545,33 @@ async fn call_tool(state: &McpState, name: &str, args: Value) -> Result<Value> {
                 state.manager.stop_profile(&p.id).await?;
                 Ok(json!({ "stopped": p.name }))
             }
+        }
+        "set_window_hidden" => {
+            let target = req_str(&args, "profile")?;
+            let hidden = args
+                .get("hidden")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| anyhow::anyhow!("'hidden' (boolean) is required"))?;
+            let profiles = state.load_profiles()?;
+            let p = resolve_profile(&profiles, &target)?;
+            let paths = mub_core::AppPaths::default_root()?;
+            let rec = mub_core::RunningStore::alive(&paths.running_file())
+                .into_iter()
+                .find(|r| r.profile_id == p.id)
+                .ok_or_else(|| anyhow::anyhow!("'{}' is not running", p.name))?;
+            // Keep this session's keeper in sync, then act on the window directly (works for
+            // instances started by the GUI or another mub process too).
+            state.manager.set_window_hidden(&p.id, hidden, !hidden).await;
+            let n = tokio::task::spawn_blocking(move || {
+                if hidden {
+                    mub_core::window::hide_pid(rec.pid)
+                } else {
+                    mub_core::window::show_pid(rec.pid, true)
+                }
+            })
+            .await
+            .unwrap_or(0);
+            Ok(json!({ "profile": p.name, "hidden": hidden, "windows": n }))
         }
         "list_running_instances" => {
             let list = state.manager.list_statuses().await;
@@ -1757,6 +1822,7 @@ fn parse_source_filter(s: &str) -> Result<SourceFilter> {
         "all" => Ok(SourceFilter::All),
         "modrinth" => Ok(SourceFilter::Modrinth),
         "curseforge" => Ok(SourceFilter::CurseForge),
+        "github" | "gh" => Ok(SourceFilter::GitHub),
         _ => anyhow::bail!("Invalid source '{s}'."),
     }
 }
