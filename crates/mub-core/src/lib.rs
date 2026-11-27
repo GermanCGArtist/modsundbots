@@ -205,6 +205,9 @@ mod tests {
         assert_eq!(required_java_major("1.16.5"), 8);
         assert_eq!(required_java_major("1.12.2"), 8);
         assert_eq!(required_java_major("24w14a"), 21);
+        assert_eq!(required_java_major("26.1.1"), 25);
+        assert_eq!(required_java_major("26.3"), 25);
+        assert_eq!(required_java_major("26.1-snapshot-1"), 25);
 
         let installs = vec![
             JavaInstallation {

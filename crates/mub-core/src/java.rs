@@ -309,6 +309,10 @@ pub fn required_java_major(mc_version: &str) -> u32 {
     let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let patch: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
+    // Year-numbered releases (26.1, 26.3, also "26.1-snapshot-1") are built for Java 25.
+    if major >= 26 {
+        return 25;
+    }
     if major >= 2 {
         return 21;
     }
